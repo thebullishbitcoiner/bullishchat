@@ -1,3 +1,4 @@
+import pkg from '../package.json';
 import { SimplePool, generateSecretKey, getPublicKey, getEventHash, finalizeEvent } from 'nostr-tools';
 import * as nip19 from 'nostr-tools/nip19';
 // Note: nip44 is used for both ephemeral key operations and user key operations
@@ -64,14 +65,18 @@ async function connectWithExtension() {
         });
         
         const results = await Promise.allSettled(connectPromises);
-        const successfulConnections = results.filter(r => r.status === 'fulfilled' && r.value.success).length;
+        const relayResults = results
+            .filter((r) => r.status === 'fulfilled')
+            .map((r) => ({ url: r.value.url, success: r.value.success }));
+        const successfulConnections = relayResults.filter((r) => r.success).length;
 
         document.getElementById('statusDot').classList.add('connected');
         document.getElementById('statusText').textContent = `Connected to ${successfulConnections}/${RELAY_URLS.length} relays`;
         document.getElementById('connectionSetup').style.display = 'none';
         document.getElementById('newDmSection').style.display = 'block';
 
-        await mergeOwnInboxRelays();
+        const inboxRelayStatuses = await mergeOwnInboxRelays();
+        setRelayStatusTooltip(relayResults, inboxRelayStatuses);
 
         // Wait a bit for connections to stabilize, then subscribe
         setTimeout(() => {
@@ -162,22 +167,48 @@ async function fetchKind10050Relays(authorPubkey) {
     }
 }
 
+/** @returns {Promise<Array<{ url: string, success: boolean }>>} */
 async function mergeOwnInboxRelays() {
     const mine = await fetchKind10050Relays(publicKey);
     if (!mine.length) {
         dmRelayUrls = [...RELAY_URLS];
-        return;
+        return [];
     }
     dmRelayUrls = [...new Set([...RELAY_URLS, ...mine])];
-    await Promise.allSettled(
+    return Promise.all(
         mine.map(async (url) => {
             try {
                 await pool.ensureRelay(url);
+                return { url, success: true };
             } catch (err) {
                 console.warn('Could not connect to inbox relay:', url, err);
+                return { url, success: false };
             }
         })
     );
+}
+
+function setRelayStatusTooltip(defaultResults, inboxResults = []) {
+    const indicator = document.getElementById('statusIndicator');
+    const popover = document.getElementById('statusRelayPopover');
+    if (!indicator || !popover) return;
+
+    const lines = ['Default relays:'];
+    for (const { url, success } of defaultResults) {
+        lines.push(`${success ? '✓' : '✗'} ${url}`);
+    }
+    if (inboxResults.length > 0) {
+        lines.push('');
+        lines.push('Inbox relays (kind 10050):');
+        for (const { url, success } of inboxResults) {
+            lines.push(`${success ? '✓' : '✗'} ${url}`);
+        }
+    }
+
+    popover.textContent = lines.join('\n');
+    indicator.setAttribute('aria-describedby', 'statusRelayPopover');
+    indicator.removeAttribute('title');
+    indicator.tabIndex = 0;
 }
 
 // Generate random timestamp within 2 days in the past
@@ -416,6 +447,14 @@ async function startNewConversation() {
     }
 }
 
+function isMobileLayout() {
+    return window.matchMedia('(max-width: 768px)').matches;
+}
+
+function setMobileChatPanel(open) {
+    document.querySelector('.container')?.classList.toggle('mobile-chat-visible', open);
+}
+
 function openChat(pubkey) {
     currentChat = pubkey;
     document.getElementById('emptyState').style.display = 'none';
@@ -424,7 +463,17 @@ function openChat(pubkey) {
     updateChatHeader(pubkey);
     displayMessages(pubkey);
     updateConversationsList();
+
+    if (isMobileLayout()) {
+        setMobileChatPanel(true);
+    }
 }
+
+function backToConversations() {
+    setMobileChatPanel(false);
+}
+
+window.backToConversations = backToConversations;
 
 // Update chat header with display name
 function updateChatHeader(pubkey) {
@@ -691,6 +740,17 @@ window.sendMessage = sendMessage;
 
 // Initialize DOM event listeners when DOM is ready
 document.addEventListener('DOMContentLoaded', function() {
+    const versionEl = document.getElementById('appVersion');
+    if (versionEl) {
+        versionEl.textContent = 'v' + pkg.version;
+    }
+
+    window.addEventListener('resize', function() {
+        if (!isMobileLayout()) {
+            setMobileChatPanel(false);
+        }
+    });
+
     const messageInput = document.getElementById('messageInput');
     if (messageInput) {
         // Auto-resize textarea

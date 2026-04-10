@@ -10,11 +10,14 @@
     <div class="container">
         <div class="sidebar">
             <div class="sidebar-header">
-                <h1>bullishChat</h1>
-                <div class="nip-badge">NIP-17 Compliant</div>
-                <div class="status-indicator">
+                <h1 class="app-title">
+                    <span class="app-name">bullishChat</span>
+                    <span class="app-version" id="appVersion" aria-label="App version"></span>
+                </h1>
+                <div class="status-indicator" id="statusIndicator">
                     <div class="status-dot" id="statusDot"></div>
                     <span id="statusText">Not connected</span>
+                    <div class="status-relay-popover" id="statusRelayPopover" role="tooltip"></div>
                 </div>
             </div>
 
@@ -57,8 +60,13 @@
 
             <div id="chatView" style="display:none;">
                 <div class="chat-header">
-                    <div class="chat-with">Chatting with</div>
-                    <div class="chat-pubkey" id="currentChatPubkey"></div>
+                    <button type="button" class="chat-back-btn" onclick="backToConversations()" aria-label="Back to conversations">
+                        <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+                    </button>
+                    <div class="chat-header-text">
+                        <div class="chat-with">Chatting with</div>
+                        <div class="chat-pubkey" id="currentChatPubkey"></div>
+                    </div>
                 </div>
 
                 <div class="messages-container" id="messagesContainer"></div>

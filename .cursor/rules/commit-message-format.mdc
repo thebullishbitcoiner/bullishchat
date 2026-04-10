@@ -1,0 +1,32 @@
+---
+description: Enforce repository commit message format
+alwaysApply: true
+---
+
+# Commit Message Format
+
+- Always follow this commit title format:
+  - `vX.Y.Z: <concise summary>`
+- Use semantic version style for the prefix (for example `v0.66.3`).
+- Prefer a single-line title plus short bullet points in the body when needed.
+- Keep bullets focused on user-visible behavior and important implementation details.
+- Before committing, check recent commits and match this repository's style.
+
+## Required Structure
+
+```text
+vX.Y.Z: <summary of change areas>
+- <key change 1>
+- <key change 2>
+- <key change 3>
+```
+
+## Example
+
+```text
+v0.66.3: Analytics pagination past PostgREST limit; super-admin dashboard polish; secure analytics APIs
+- Paginate PostgREST queries past 1000 rows (super-admin and shop analytics, getOrders, getProducts) via shared fetchAllRows helper
+- Super-admin dashboard: total orders metric, subscription pie legend layout, theme-aware tooltips, Recharts container sizing
+- Secure analytics APIs: private no-store headers, rate limits on overview and super-admin analytics, remove error detail leakage on visit/overview errors
+- Client fetches use cache: no-store for analytics endpoints
+```

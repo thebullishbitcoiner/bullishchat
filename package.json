@@ -1,6 +1,6 @@
 {
-  "name": "nostr-dm",
-  "version": "1.0.0",
+  "name": "bullishchat",
+  "version": "0.0.2",
   "description": "bullishChat - NIP-17 Private Messaging",
   "type": "module",
   "scripts": {
