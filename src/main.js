@@ -21,6 +21,14 @@ let userProfiles = {}; // Store user profiles (display names, etc.)
 let messageSubscription = null; // Store the message subscription
 /** Relays used for DM subscribe/publish: default list plus our kind 10050 inbox relays after connect */
 let dmRelayUrls = [...RELAY_URLS];
+/** Dedupe kind 1059 events across historical query + live subscription (same id from many relays) */
+const seenGiftWrapEventIds = new Set();
+
+/** Lowercase hex pubkey for stable Map keys and comparisons */
+function normalizePubkey(pk) {
+    if (typeof pk !== 'string' || !/^[a-fA-F0-9]{64}$/.test(pk)) return pk;
+    return pk.toLowerCase();
+}
 
 // Check if NIP-07 extension is available
 function hasNostrExtension() {
@@ -34,8 +42,8 @@ async function connectWithExtension() {
     }
 
     try {
-        // Get public key from extension
-        publicKey = await window.nostr.getPublicKey();
+        // Get public key from extension (normalize so tag/filter comparisons match)
+        publicKey = normalizePubkey(await window.nostr.getPublicKey());
 
         // Check if extension supports NIP-44 (required for this app)
         if (!window.nostr.nip44 || !window.nostr.nip44.encrypt || !window.nostr.nip44.decrypt) {
@@ -78,9 +86,13 @@ async function connectWithExtension() {
         const inboxRelayStatuses = await mergeOwnInboxRelays();
         setRelayStatusTooltip(relayResults, inboxRelayStatuses);
 
-        // Wait a bit for connections to stabilize, then subscribe
+        // Load stored gift wraps explicitly (some relays are slow or flaky with REQ+live overlap),
+        // then keep a live subscription for new events.
         setTimeout(() => {
-            subscribeToMessages();
+            void (async () => {
+                await fetchHistoricalGiftWraps();
+                subscribeToMessages();
+            })();
         }, 1000);
 
     } catch (error) {
@@ -218,16 +230,40 @@ function getRandomPastTimestamp() {
     return twoDaysAgo + Math.floor(Math.random() * (2 * 24 * 60 * 60));
 }
 
+/** Pull stored kind 1059 from relays (closes after EOSE per relay; more reliable than live sub alone). */
+async function fetchHistoricalGiftWraps() {
+    if (!pool || !publicKey) return;
+
+    const filter = {
+        kinds: [1059],
+        '#p': [publicKey]
+    };
+
+    try {
+        const events = await pool.querySync(dmRelayUrls, filter, { maxWait: 25000 });
+        console.log(`📥 Historical gift wraps: ${events.length} event(s) from querySync`);
+        events.sort((a, b) => a.created_at - b.created_at);
+        for (const ev of events) {
+            try {
+                await handleGiftWrappedMessage(ev);
+            } catch (err) {
+                console.error('Error handling historical gift wrap:', err);
+            }
+        }
+    } catch (err) {
+        console.warn('Historical gift wrap querySync failed:', err);
+    }
+}
+
 function subscribeToMessages() {
     // Subscribe to kind 1059 (gift-wrapped) events tagged with our pubkey
     // SimplePool.subscribe automatically queries all connected relays
     // Store the subscription so it stays alive
     console.log('Setting up subscription for publicKey:', publicKey);
     console.log('Subscribing to relays:', dmRelayUrls);
-    
+
     let eventCount = 0;
-    const seenEventIds = new Set(); // Track seen events to detect duplicates
-    
+
     // Create filter for gift-wrapped messages (kind 1059) tagged with our pubkey
     // Note: pool.subscribe takes a single filter object, not an array
     // Remove 'since' to get all historical messages, not just recent ones
@@ -236,45 +272,44 @@ function subscribeToMessages() {
         '#p': [publicKey]
     };
     console.log('Subscription filter:', JSON.stringify(filter, null, 2));
-    
+
     messageSubscription = pool.subscribe(dmRelayUrls, filter, {
         onevent(event) {
             eventCount++;
-            const isDuplicate = seenEventIds.has(event.id);
-            seenEventIds.add(event.id);
-            
-            console.log(`✅ Received gift-wrapped message #${eventCount}${isDuplicate ? ' (duplicate)' : ''}:`, {
+            const isDup = seenGiftWrapEventIds.has(event.id);
+            console.log(`✅ Received gift-wrapped message #${eventCount}${isDup ? ' (duplicate)' : ''}:`, {
                 id: event.id,
                 kind: event.kind,
                 created_at: new Date(event.created_at * 1000).toISOString(),
                 tags: event.tags
             });
-            
-            // Only process if not a duplicate
-            if (!isDuplicate) {
-                // Handle message asynchronously - don't let errors in one message stop others
-                handleGiftWrappedMessage(event).catch(error => {
-                    console.error('Error in handleGiftWrappedMessage (non-blocking):', error);
-                });
-            }
+
+            handleGiftWrappedMessage(event).catch((error) => {
+                console.error('Error in handleGiftWrappedMessage (non-blocking):', error);
+            });
         },
         oneose() {
-            console.log(`📭 EOSE (End of Stored Events) - received ${eventCount} total events, ${seenEventIds.size} unique`);
+            console.log(`📭 EOSE (End of Stored Events) - received ${eventCount} total events, ${seenGiftWrapEventIds.size} unique ids`);
         }
     });
-    
+
     console.log('✅ Subscription active - listening for messages on', dmRelayUrls.length, 'relays');
     console.log('💡 Querying all historical messages (no time limit)');
 }
 
 async function handleGiftWrappedMessage(giftWrap) {
+    if (seenGiftWrapEventIds.has(giftWrap.id)) {
+        return;
+    }
+    seenGiftWrapEventIds.add(giftWrap.id);
+
     console.log('Processing gift-wrapped message:', {
         id: giftWrap.id,
         kind: giftWrap.kind,
         pubkey: giftWrap.pubkey,
         tags: giftWrap.tags
     });
-    
+
     try {
         // Step 1: Unwrap the gift wrap (kind 1059) using NIP-44
         // Gift wrap is encrypted FROM ephemeral key TO our public key
@@ -313,21 +348,37 @@ async function handleGiftWrappedMessage(giftWrap) {
         }
 
         // Step 3: Decrypt the seal to get the rumor (kind 14)
-        // Seal is encrypted FROM sender TO our public key
-        console.log('Decrypting seal from sender:', seal.pubkey);
+        // NIP-44 peer for decrypt is always the *other* party in the conversation:
+        // - Incoming: seal author is the sender → decrypt(seal.pubkey, …).
+        // - Our own sender copy: seal author is us; payload was encrypt(recipient, …) → decrypt(recipient, …).
+        const sealAuthor = normalizePubkey(seal.pubkey);
+        let sealDecryptPeer = seal.pubkey;
+        if (sealAuthor === publicKey) {
+            const sealPTag = Array.isArray(seal.tags)
+                ? seal.tags.find((t) => t[0] === 'p' && typeof t[1] === 'string' && t[1].length)
+                : null;
+            if (!sealPTag) {
+                console.warn(
+                    'Skipping own kind 13 seal without p tag (cannot determine NIP-44 peer; re-send from updated app to fix).',
+                    { eventId: giftWrap.id }
+                );
+                return;
+            }
+            sealDecryptPeer = normalizePubkey(sealPTag[1]);
+        }
+
+        console.log('Decrypting seal; nip44 peer:', sealDecryptPeer);
         let rumorJSON;
         try {
-            rumorJSON = await window.nostr.nip44.decrypt(
-                seal.pubkey,
-                seal.content
-            );
+            rumorJSON = await window.nostr.nip44.decrypt(sealDecryptPeer, seal.content);
             console.log('Successfully decrypted seal');
         } catch (decryptError) {
             // If seal decryption fails, skip this message
             console.warn('Failed to decrypt seal (may not be for us or wrong encryption):', {
                 error: decryptError.message,
                 eventId: giftWrap.id,
-                senderPubkey: seal.pubkey
+                sealAuthor: seal.pubkey,
+                nip44Peer: sealDecryptPeer
             });
             return; // Skip this message, continue with others
         }
@@ -342,37 +393,54 @@ async function handleGiftWrappedMessage(giftWrap) {
         }
 
         // Step 5: Verify the sender
-        if (seal.pubkey !== rumor.pubkey) {
+        if (normalizePubkey(seal.pubkey) !== normalizePubkey(rumor.pubkey)) {
             console.error('Sender pubkey mismatch - potential impersonation attempt');
             return;
         }
 
-        const senderPubkey = rumor.pubkey;
-        
-        // Initialize conversation if needed
-        if (!conversations[senderPubkey]) {
-            conversations[senderPubkey] = [];
+        const authorPubkey = normalizePubkey(rumor.pubkey);
+        // Peer thread key: incoming DMs use the author; our own messages (sender copy, kind 14
+        // pubkey = us) must use the recipient from the rumor's p tag so they land in the same
+        // conversation as openChat(peer) / sendMessage().
+        let conversationPubkey = authorPubkey;
+        if (authorPubkey === publicKey) {
+            const pTag = Array.isArray(rumor.tags)
+                ? rumor.tags.find((t) => t[0] === 'p' && typeof t[1] === 'string' && t[1].length)
+                : null;
+            if (!pTag) {
+                console.error('Outgoing kind 14 missing p tag; cannot assign conversation');
+                return;
+            }
+            conversationPubkey = normalizePubkey(pTag[1]);
         }
 
-        // Add message to conversation
-        conversations[senderPubkey].push({
+        if (!conversations[conversationPubkey]) {
+            conversations[conversationPubkey] = [];
+        }
+
+        // Same logical message can appear locally first, then again from our self-addressed gift wrap
+        if (rumor.id && conversations[conversationPubkey].some((m) => m.id === rumor.id)) {
+            return;
+        }
+
+        conversations[conversationPubkey].push({
+            id: rumor.id,
             content: rumor.content,
             timestamp: rumor.created_at,
-            from: senderPubkey,
+            from: authorPubkey,
             actualTimestamp: giftWrap.created_at
         });
 
-        conversations[senderPubkey].sort((a, b) => a.timestamp - b.timestamp);
+        conversations[conversationPubkey].sort((a, b) => a.timestamp - b.timestamp);
 
-        // Fetch user profile if we don't have it
-        if (!userProfiles[senderPubkey]) {
-            await fetchUserProfile(senderPubkey);
+        if (!userProfiles[conversationPubkey]) {
+            await fetchUserProfile(conversationPubkey);
         }
 
         updateConversationsList();
-        if (currentChat === senderPubkey) {
-            displayMessages(senderPubkey);
-            updateChatHeader(senderPubkey);
+        if (currentChat === conversationPubkey) {
+            displayMessages(conversationPubkey);
+            updateChatHeader(conversationPubkey);
         }
 
     } catch (error) {
@@ -432,6 +500,7 @@ async function startNewConversation() {
             const decoded = nip19.decode(pubkeyInput);
             pubkeyInput = decoded.data;
         }
+        pubkeyInput = normalizePubkey(pubkeyInput);
 
         if (!conversations[pubkeyInput]) {
             conversations[pubkeyInput] = [];
@@ -456,7 +525,7 @@ function setMobileChatPanel(open) {
 }
 
 function openChat(pubkey) {
-    currentChat = pubkey;
+    currentChat = normalizePubkey(pubkey);
     document.getElementById('emptyState').style.display = 'none';
     document.getElementById('chatView').style.display = 'flex';
 
@@ -630,28 +699,40 @@ async function sendMessage() {
         // Use extension's nip44 (we already checked it exists at connection time)
         const encryptedRumor = await window.nostr.nip44.encrypt(currentChat, sealContent);
 
-        const seal = {
+        // p tag = DM counterparty for NIP-44. Required so when we reload, decrypt(..., seal) uses the
+        // recipient (encrypt was nip44.encrypt(currentChat, …), not encrypt(self, …)).
+        const sealTemplate = {
             kind: 13,
             pubkey: publicKey,
             created_at: getRandomPastTimestamp(),
-            tags: [],
+            tags: relayHint ? [['p', currentChat, relayHint]] : [['p', currentChat]],
             content: encryptedRumor
         };
 
-        // Sign the seal with extension
-        const signedSeal = await window.nostr.signEvent(seal);
-        seal.id = signedSeal.id;
-        seal.sig = signedSeal.sig;
+        const signedSeal = await window.nostr.signEvent(sealTemplate);
+        // Use the signer output but keep our ciphertext/tags if the extension omits them
+        const sealToWrap = {
+            kind: 13,
+            pubkey: signedSeal.pubkey ?? sealTemplate.pubkey,
+            created_at: signedSeal.created_at ?? sealTemplate.created_at,
+            tags: signedSeal.tags?.length ? signedSeal.tags : sealTemplate.tags,
+            content: sealTemplate.content,
+            id: signedSeal.id,
+            sig: signedSeal.sig
+        };
+        if (!sealToWrap.id || !sealToWrap.sig) {
+            throw new Error('Signing failed: missing id or sig');
+        }
 
         // Step 3: Gift wrap for recipient (publish to their inbox relays per NIP-17 + defaults)
-        await createAndPublishGiftWrap(seal, currentChat, publishRelays, relayHint);
+        await createAndPublishGiftWrap(sealToWrap, currentChat, publishRelays, relayHint);
 
         // Step 4: Gift wrap for sender (ourselves) — use our inbox + defaults so our other clients see the same thread
         const selfInbox = await fetchKind10050Relays(publicKey);
         const selfPublishRelays =
             selfInbox.length > 0 ? [...new Set([...selfInbox, ...RELAY_URLS])] : publishRelays;
         // Sender copy: only use our own inbox relay hint, not the peer's (avoids wrong room on our other clients)
-        await createAndPublishGiftWrap(seal, publicKey, selfPublishRelays, selfInbox[0] || null);
+        await createAndPublishGiftWrap(sealToWrap, publicKey, selfPublishRelays, selfInbox[0] || null);
 
         // Add to local conversation
         if (!conversations[currentChat]) {
@@ -659,6 +740,7 @@ async function sendMessage() {
         }
 
         conversations[currentChat].push({
+            id: rumor.id,
             content: content,
             timestamp: now,
             from: publicKey
@@ -684,20 +766,22 @@ async function createAndPublishGiftWrap(seal, recipientPubkey, publishRelays, re
     const ephemeralKey = generateSecretKey();
     const ephemeralPubkey = getPublicKey(ephemeralKey);
 
+    const recipientHex = normalizePubkey(recipientPubkey);
+
     // Encrypt the seal using NIP-44 with the ephemeral key
     // Note: We use nostr-tools nip44 here (not extension) because:
     // 1. The extension's nip44 uses the user's key
     // 2. Gift wrapping requires encryption FROM an ephemeral key TO the recipient
     // 3. Ephemeral keys are temporary and not stored in the extension
     const sealJSON = JSON.stringify(seal);
-    
+
     // Get conversation key for ephemeral key -> recipient encryption
     // This is the only place we use nostr-tools nip44; all user operations use extension
-    const conversationKey = getConversationKey(ephemeralKey, recipientPubkey);
+    const conversationKey = getConversationKey(ephemeralKey, recipientHex);
     const encryptedSeal = nip44Encrypt(sealJSON, conversationKey);
 
     // Create gift wrap (kind 1059); optional third element on p matches NIP-17 / interop room identity
-    const pTag = relayHint ? ['p', recipientPubkey, relayHint] : ['p', recipientPubkey];
+    const pTag = relayHint ? ['p', recipientHex, relayHint] : ['p', recipientHex];
     const giftWrap = {
         kind: 1059,
         pubkey: ephemeralPubkey,
