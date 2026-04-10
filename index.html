@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>bullishChat - NIP-17 Private Messaging</title>
+    <link rel="stylesheet" href="/src/styles.css">
+</head>
+<body>
+    <div class="container">
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <h1>bullishChat</h1>
+                <div class="nip-badge">NIP-17 Compliant</div>
+                <div class="status-indicator">
+                    <div class="status-dot" id="statusDot"></div>
+                    <span id="statusText">Not connected</span>
+                </div>
+            </div>
+
+            <div class="connection-setup" id="connectionSetup">
+                <button class="btn" onclick="connectWithExtension()">
+                    <svg viewBox="0 0 24 24" style="width: 16px; height: 16px; fill: currentColor; display: inline-block; vertical-align: middle; margin-right: 6px;">
+                        <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z"/>
+                    </svg>
+                    Login with Nostr
+                </button>
+                
+                <div class="info-text">
+                    Requires a NIP-07 browser extension like <strong>Alby</strong>, <strong>nos2x</strong>, <strong>Flamingo</strong>, or <strong>horse</strong>
+                </div>
+                
+                <div class="info-text" style="margin-top: 12px; padding: 12px; background: #1a1a1a; border-radius: 8px; border-left: 3px solid #ff9900;">
+                    🔒 For your security, this app only supports browser extensions. Your private keys stay safe in the extension and never touch this website.
+                </div>
+            </div>
+
+            <div class="new-dm-section" id="newDmSection" style="display:none;">
+                <h3>Start New Conversation</h3>
+                <div class="input-group">
+                    <input type="text" id="newDmPubkey" placeholder="Recipient pubkey (npub or hex)">
+                </div>
+                <button class="btn" onclick="startNewConversation()">Start Chat</button>
+            </div>
+
+            <div class="conversations-list" id="conversationsList"></div>
+        </div>
+
+        <div class="chat-area">
+            <div id="emptyState" class="empty-state">
+                <svg viewBox="0 0 24 24">
+                    <path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/>
+                </svg>
+                <div>Select a conversation or start a new one</div>
+                <div style="font-size: 12px; color: #444;">Your messages are protected with NIP-17 encryption</div>
+            </div>
+
+            <div id="chatView" style="display:none;">
+                <div class="chat-header">
+                    <div class="chat-with">Chatting with</div>
+                    <div class="chat-pubkey" id="currentChatPubkey"></div>
+                </div>
+
+                <div class="messages-container" id="messagesContainer"></div>
+
+                <div class="chat-input-container">
+                    <div class="chat-input-wrapper">
+                        <textarea class="chat-input" id="messageInput" placeholder="Type a message..." rows="1"></textarea>
+                        <button class="send-btn" id="sendBtn" onclick="sendMessage()">
+                            <svg viewBox="0 0 24 24">
+                                <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+</body>
+</html>
+

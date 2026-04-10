@@ -1,0 +1,17 @@
+{
+  "name": "nostr-dm",
+  "version": "1.0.0",
+  "description": "bullishChat - NIP-17 Private Messaging",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0"
+  },
+  "dependencies": {
+    "nostr-tools": "^2.18.0"
+  }
+}
