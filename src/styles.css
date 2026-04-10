@@ -24,6 +24,7 @@ body {
 
 .sidebar {
     width: 320px;
+    min-height: 0;
     background: #121212;
     border-right: 1px solid #1f1f1f;
     display: flex;
@@ -31,6 +32,7 @@ body {
 }
 
 .sidebar-header {
+    flex-shrink: 0;
     padding: 20px;
     border-bottom: 1px solid #1f1f1f;
     background: #0f0f0f;
@@ -122,6 +124,7 @@ body {
 }
 
 .connection-setup {
+    flex-shrink: 0;
     padding: 20px;
 }
 
@@ -193,8 +196,10 @@ body {
 }
 
 .conversations-list {
-    flex: 1;
+    flex: 1 1 0;
+    min-height: 0;
     overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
 }
 
 .conversation-item {
@@ -330,7 +335,10 @@ body {
     word-wrap: break-word;
     overflow-wrap: break-word;
     word-break: break-word;
-    white-space: normal;
+}
+
+.message-body {
+    white-space: pre-line;
 }
 
 @keyframes slideIn {
@@ -466,6 +474,7 @@ body {
 }
 
 .new-dm-section {
+    flex-shrink: 0;
     padding: 20px;
     border-bottom: 1px solid #1f1f1f;
 }

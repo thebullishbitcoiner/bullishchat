@@ -651,12 +651,17 @@ function displayMessages(pubkey) {
 
         const div = document.createElement('div');
         div.className = 'message ' + (msg.from === publicKey ? 'sent' : 'received');
-        
-        const time = formatTimestamp(msg.timestamp);
-        div.innerHTML = `
-            ${msg.content}
-            <div class="message-time">${time}</div>
-        `;
+
+        const bodyEl = document.createElement('div');
+        bodyEl.className = 'message-body';
+        bodyEl.textContent = msg.content;
+
+        const timeEl = document.createElement('div');
+        timeEl.className = 'message-time';
+        timeEl.textContent = formatTimestamp(msg.timestamp);
+
+        div.appendChild(bodyEl);
+        div.appendChild(timeEl);
 
         container.appendChild(div);
     });
