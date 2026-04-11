@@ -4,9 +4,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>bullishChat - NIP-17 Private Messaging</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400..700;1,9..40,500&family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;0,9..144,700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/src/styles.css">
 </head>
 <body>
+    <div class="ambient" aria-hidden="true"></div>
     <div class="container">
         <div class="sidebar">
             <div class="sidebar-header">
@@ -14,7 +18,7 @@
                     <span class="app-name">bullishChat</span>
                     <span class="app-version" id="appVersion" aria-label="App version"></span>
                 </h1>
-                <div class="status-indicator" id="statusIndicator">
+                <div class="status-indicator status-indicator--compact" id="statusIndicator">
                     <div class="status-dot" id="statusDot"></div>
                     <span id="statusText">Not connected</span>
                     <div class="status-relay-popover" id="statusRelayPopover" role="tooltip"></div>
@@ -22,19 +26,32 @@
             </div>
 
             <div class="connection-setup" id="connectionSetup">
-                <button class="btn" onclick="connectWithExtension()">
-                    <svg viewBox="0 0 24 24" style="width: 16px; height: 16px; fill: currentColor; display: inline-block; vertical-align: middle; margin-right: 6px;">
-                        <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z"/>
-                    </svg>
+                <div class="landing-hero">
+                    <p class="landing-eyebrow">NIP-17 · Gift-wrapped DMs</p>
+                    <h2 class="landing-headline">Private messaging on Nostr</h2>
+                    <p class="landing-lede">Sign in with a NIP-07 extension to open your inbox, sync relays, and chat with end-to-end encryption.</p>
+                </div>
+
+                <button type="button" class="btn btn-landing" onclick="connectWithExtension()">
                     Login with Nostr
                 </button>
-                
-                <div class="info-text">
-                    Requires a NIP-07 browser extension like <strong>Alby</strong>, <strong>nos2x</strong>, <strong>Flamingo</strong>, or <strong>horse</strong>
+
+                <div class="landing-extensions">
+                    <span class="landing-extensions-label">Works with</span>
+                    <p class="landing-extensions-list">
+                        <a href="https://getalby.com/" target="_blank" rel="noopener noreferrer">Alby</a>
+                        <span class="landing-extensions-sep" aria-hidden="true">·</span>
+                        <a href="https://github.com/fiatjaf/nos2x" target="_blank" rel="noopener noreferrer">nos2x</a>
+                        <span class="landing-extensions-sep" aria-hidden="true">·</span>
+                        <a href="https://getflamingo.org/" target="_blank" rel="noopener noreferrer">Flamingo</a>
+                        <span class="landing-extensions-sep" aria-hidden="true">·</span>
+                        <a href="https://github.com/fiatjaf/horse" target="_blank" rel="noopener noreferrer">horse</a>
+                    </p>
                 </div>
-                
-                <div class="info-text" style="margin-top: 12px; padding: 12px; background: #1a1a1a; border-radius: 8px; border-left: 3px solid #ff9900;">
-                    🔒 For your security, this app only supports browser extensions. Your private keys stay safe in the extension and never touch this website.
+
+                <div class="security-callout">
+                    <span class="security-callout-icon" aria-hidden="true">🔒</span>
+                    <p><strong>Extension-only.</strong> This app never sees your private keys—they stay in your extension.</p>
                 </div>
             </div>
 
@@ -49,13 +66,16 @@
             <div class="conversations-list" id="conversationsList"></div>
         </div>
 
-        <div class="chat-area">
+        <div class="chat-area" id="chatArea" hidden>
             <div id="emptyState" class="empty-state">
-                <svg viewBox="0 0 24 24">
-                    <path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/>
-                </svg>
-                <div>Select a conversation or start a new one</div>
-                <div style="font-size: 12px; color: #444;">Your messages are protected with NIP-17 encryption</div>
+                <div class="empty-state-icon-wrap" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" class="empty-state-icon">
+                        <path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/>
+                    </svg>
+                </div>
+                <h2 class="empty-state-title">Your inbox</h2>
+                <p class="empty-state-text">Pick a conversation from the list or start a new one with a pubkey or npub.</p>
+                <p class="empty-state-hint">Messages use NIP-17 gift wraps and NIP-44 encryption.</p>
             </div>
 
             <div id="chatView" style="display:none;">
@@ -72,13 +92,19 @@
                 <div class="messages-container" id="messagesContainer"></div>
 
                 <div class="chat-input-container">
-                    <div class="chat-input-wrapper">
-                        <textarea class="chat-input" id="messageInput" placeholder="Type a message..." rows="1"></textarea>
-                        <button class="send-btn" id="sendBtn" onclick="sendMessage()">
-                            <svg viewBox="0 0 24 24">
-                                <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
-                            </svg>
-                        </button>
+                    <div class="chat-input-shell">
+                        <div class="chat-input-main">
+                            <button type="button" class="emoji-toggle-btn" id="emojiToggleBtn" aria-label="Open emoji picker" aria-expanded="false" aria-controls="emojiPanel" title="Emoji">
+                                <span class="emoji-toggle-icon" aria-hidden="true">😊</span>
+                            </button>
+                            <textarea class="chat-input" id="messageInput" placeholder="Type a message..." rows="1" enterkeyhint="send"></textarea>
+                            <button type="button" class="send-btn" id="sendBtn" onclick="sendMessage()" aria-label="Send message">
+                                <svg viewBox="0 0 24 24" aria-hidden="true">
+                                    <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+                                </svg>
+                            </button>
+                        </div>
+                        <div class="emoji-panel" id="emojiPanel" role="dialog" aria-label="Emoji picker" hidden></div>
                     </div>
                 </div>
             </div>

@@ -24,6 +24,79 @@ let dmRelayUrls = [...RELAY_URLS];
 /** Dedupe kind 1059 events across historical query + live subscription (same id from many relays) */
 const seenGiftWrapEventIds = new Set();
 
+/** Grapheme-safe emoji list for the in-app picker (Array.from preserves surrogate pairs). */
+const EMOJI_PICKER_CHARS = Array.from(
+    '😀😃😄😁😅😂🤣🥲😊😇🙂😉😌😍🥰😘😗😙😚😋😛😜🤪🤑🤗🤭🤔🤐🤨😐😑😏😒🙄😬🤥😪🤤😴🥱😮😯😲😳🥺😦😧😨😰😥😢😭😱😖😣😞😓😩😫🤯🤠🥳🥸😎🤓🧐😕😟🙁☹️😡🤬😈👿🤡💀☠️💩👻👽👾🤖💋💘💝💖💗💓💞💕💟❣️💔❤️🧡💛💚💙💜🤎🖤🤍💯💢💥💫💦💨👋🤚🖐️✋🖖👌🤌✌️🤞🤟🤘🤙👍👎✊👏🙌👐🤲🤝🙏✍️💪🦾🫶👀👂🦻👃🧠💬🗨️👁️💤🔥✨⭐🌟💫⚡🎉🎊✅❌❓❗📌📎🔗🧵🍻☕🫖🎯🏆🎮'
+);
+
+function insertAtCursor(textarea, text) {
+    if (!textarea || typeof text !== 'string') return;
+    textarea.focus();
+    const start = textarea.selectionStart ?? 0;
+    const end = textarea.selectionEnd ?? 0;
+    if (typeof textarea.setRangeText === 'function') {
+        textarea.setRangeText(text, start, end, 'end');
+    } else {
+        const value = textarea.value;
+        textarea.value = value.slice(0, start) + text + value.slice(end);
+        const pos = start + text.length;
+        textarea.selectionStart = textarea.selectionEnd = pos;
+    }
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function initEmojiPicker() {
+    const panel = document.getElementById('emojiPanel');
+    const btn = document.getElementById('emojiToggleBtn');
+    const input = document.getElementById('messageInput');
+    if (!panel || !btn || !input) return;
+
+    const grid = document.createElement('div');
+    grid.className = 'emoji-grid';
+    for (const ch of EMOJI_PICKER_CHARS) {
+        const cell = document.createElement('button');
+        cell.type = 'button';
+        cell.className = 'emoji-cell';
+        cell.textContent = ch;
+        cell.title = ch;
+        cell.addEventListener('click', () => {
+            insertAtCursor(input, ch);
+        });
+        grid.appendChild(cell);
+    }
+    panel.appendChild(grid);
+
+    function closePanel() {
+        panel.hidden = true;
+        btn.setAttribute('aria-expanded', 'false');
+    }
+
+    function openPanel() {
+        panel.hidden = false;
+        btn.setAttribute('aria-expanded', 'true');
+    }
+
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (panel.hidden) openPanel();
+        else closePanel();
+    });
+
+    document.addEventListener('click', (e) => {
+        if (panel.hidden) return;
+        const t = e.target;
+        if (panel.contains(t) || btn.contains(t)) return;
+        closePanel();
+    });
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && !panel.hidden) {
+            closePanel();
+            btn.focus();
+        }
+    });
+}
+
 /** Lowercase hex pubkey for stable Map keys and comparisons */
 function normalizePubkey(pk) {
     if (typeof pk !== 'string' || !/^[a-fA-F0-9]{64}$/.test(pk)) return pk;
@@ -37,7 +110,7 @@ function hasNostrExtension() {
 
 async function connectWithExtension() {
     if (!hasNostrExtension()) {
-        alert('No Nostr extension detected!\n\nPlease install a NIP-07 compatible extension:\n\n• Alby (recommended) - https://getalby.com\n• nos2x - Lightweight extension\n• Flamingo - Feature-rich\n• horse - Privacy-focused\n\nAfter installing, refresh this page and try again.');
+        alert('No Nostr extension detected!\n\nPlease install a NIP-07 compatible extension:\n\n• Alby (recommended) — https://getalby.com/\n• nos2x — https://github.com/fiatjaf/nos2x\n• Flamingo — https://getflamingo.org/\n• horse — https://github.com/fiatjaf/horse\n\nAfter installing, refresh this page and try again.');
         return;
     }
 
@@ -50,7 +123,7 @@ async function connectWithExtension() {
             alert('Your Nostr extension does not support NIP-44 encryption/decryption.\n\n' +
                   'This app requires NIP-44 support for secure messaging.\n\n' +
                   'Please use an extension that supports NIP-44:\n' +
-                  '• Alby (recommended) - https://getalby.com\n' +
+                  '• Alby (recommended) — https://getalby.com/\n' +
                   '• Or another extension with NIP-44 support\n\n' +
                   'After installing/updating, refresh this page.');
             return;
@@ -82,6 +155,9 @@ async function connectWithExtension() {
         document.getElementById('statusText').textContent = `Connected to ${successfulConnections}/${RELAY_URLS.length} relays`;
         document.getElementById('connectionSetup').style.display = 'none';
         document.getElementById('newDmSection').style.display = 'block';
+        document.body.classList.add('is-authenticated');
+        const chatAreaEl = document.getElementById('chatArea');
+        if (chatAreaEl) chatAreaEl.removeAttribute('hidden');
 
         const inboxRelayStatuses = await mergeOwnInboxRelays();
         setRelayStatusTooltip(relayResults, inboxRelayStatuses);
@@ -856,5 +932,7 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         });
     }
+
+    initEmojiPicker();
 });
 
