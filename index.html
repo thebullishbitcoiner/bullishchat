@@ -55,15 +55,18 @@
                 </div>
             </div>
 
-            <div class="new-dm-section" id="newDmSection" style="display:none;">
-                <h3>Start New Conversation</h3>
-                <div class="input-group">
-                    <input type="text" id="newDmPubkey" placeholder="Recipient pubkey (npub or hex)">
-                </div>
-                <button class="btn" onclick="startNewConversation()">Start Chat</button>
-            </div>
-
             <div class="conversations-list" id="conversationsList"></div>
+
+            <div class="sidebar-fab" id="sidebarFab" hidden>
+                <div class="fab-menu" id="fabMenu" role="menu" aria-label="Create" hidden>
+                    <button type="button" class="fab-menu-item" id="fabMenuNewChat" role="menuitem">
+                        New Chat
+                    </button>
+                </div>
+                <button type="button" class="fab-plus" id="fabPlusBtn" aria-label="Create new" aria-haspopup="true" aria-expanded="false" aria-controls="fabMenu">
+                    <svg class="fab-plus-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+                </button>
+            </div>
         </div>
 
         <div class="chat-area" id="chatArea" hidden>
@@ -74,7 +77,7 @@
                     </svg>
                 </div>
                 <h2 class="empty-state-title">Your inbox</h2>
-                <p class="empty-state-text">Pick a conversation from the list or start a new one with a pubkey or npub.</p>
+                <p class="empty-state-text">Pick a conversation from the list or tap <strong class="empty-state-fab-hint">+</strong> to start a new chat.</p>
                 <p class="empty-state-hint">Messages use NIP-17 gift wraps and NIP-44 encryption.</p>
             </div>
 
@@ -108,6 +111,19 @@
                     </div>
                 </div>
             </div>
+        </div>
+    </div>
+
+    <div id="newChatModal" class="modal-backdrop" hidden>
+        <div class="modal modal--new-chat" role="dialog" aria-modal="true" aria-labelledby="newChatModalTitle" tabindex="-1">
+            <div class="modal-header">
+                <h2 id="newChatModalTitle" class="modal-title">New Chat</h2>
+                <button type="button" class="modal-close" id="newChatModalClose" aria-label="Close">×</button>
+            </div>
+            <label class="modal-label" for="newChatSearch">Search people on Nostr</label>
+            <input type="search" class="modal-search" id="newChatSearch" placeholder="Name, npub, or hex pubkey…" autocomplete="off" autocorrect="off" spellcheck="false" />
+            <div class="new-chat-suggestions" id="newChatSuggestions" role="listbox" aria-label="Search results" hidden></div>
+            <p class="modal-footnote" id="newChatSearchStatus" aria-live="polite"></p>
         </div>
     </div>
 

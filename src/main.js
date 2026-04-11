@@ -24,6 +24,425 @@ let dmRelayUrls = [...RELAY_URLS];
 /** Dedupe kind 1059 events across historical query + live subscription (same id from many relays) */
 const seenGiftWrapEventIds = new Set();
 
+/** nostr.wine search (kind 0); free tier ~1 req/s */
+const NOSTR_WINE_SEARCH_URL = 'https://api.nostr.wine/search';
+
+let wineSearchAbort = null;
+let wineSearchDebounceTimer = null;
+let wineSearchSerial = 0;
+let lastNostrWineRequestMs = 0;
+
+function buildSearchHit(pubkey, displayName = null, picture = null) {
+    const pk = normalizePubkey(pubkey);
+    let label = displayName;
+    if (!label) {
+        try {
+            const n = nip19.npubEncode(pk);
+            label = n.slice(0, 18) + (n.length > 18 ? '…' : '');
+        } catch {
+            label = pk.slice(0, 8) + '…' + pk.slice(-6);
+        }
+    }
+    let npubDisplay = pk.slice(0, 14) + '…';
+    try {
+        npubDisplay = nip19.npubEncode(pk);
+    } catch {
+        /* keep short hex */
+    }
+    return { pubkey: pk, label, npubDisplay, picture };
+}
+
+async function throttleNostrWine() {
+    const gap = 1050 - (Date.now() - lastNostrWineRequestMs);
+    if (gap > 0) {
+        await new Promise((r) => setTimeout(r, gap));
+    }
+    lastNostrWineRequestMs = Date.now();
+}
+
+/**
+ * @param {string} query
+ * @param {AbortSignal} signal
+ * @returns {Promise<Array<{ pubkey: string, label: string, npubDisplay: string, picture: string | null }>>}
+ */
+async function fetchNostrUserSuggestions(query, signal) {
+    const q = query.trim();
+    if (!q) {
+        return [];
+    }
+
+    if (/^[a-fA-F0-9]{64}$/.test(q)) {
+        const pk = normalizePubkey(q);
+        if (publicKey && pk === publicKey) {
+            return [];
+        }
+        return [buildSearchHit(pk)];
+    }
+
+    if (q.startsWith('npub')) {
+        try {
+            const decoded = nip19.decode(q);
+            if (decoded.type === 'npub') {
+                const pk = normalizePubkey(decoded.data);
+                if (publicKey && pk === publicKey) {
+                    return [];
+                }
+                return [buildSearchHit(pk)];
+            }
+        } catch {
+            return [];
+        }
+    }
+
+    if (q.length < 2) {
+        return [];
+    }
+
+    await throttleNostrWine();
+    if (signal.aborted) {
+        return [];
+    }
+
+    const url = `${NOSTR_WINE_SEARCH_URL}?${new URLSearchParams({ query: q, kind: '0', limit: '20' })}`;
+    const res = await fetch(url, { signal, headers: { Accept: 'application/json' } });
+    if (!res.ok) {
+        throw new Error(`Search failed (${res.status})`);
+    }
+    const json = await res.json();
+    const seen = new Set();
+    const hits = [];
+
+    for (const ev of json.data || []) {
+        if (!ev || ev.kind !== 0 || !ev.pubkey) {
+            continue;
+        }
+        const pk = normalizePubkey(ev.pubkey);
+        if (publicKey && pk === publicKey) {
+            continue;
+        }
+        if (seen.has(pk)) {
+            continue;
+        }
+        seen.add(pk);
+
+        let label = pk.slice(0, 8) + '…' + pk.slice(-6);
+        let picture = null;
+        try {
+            const meta = JSON.parse(ev.content || '{}');
+            label = meta.display_name || meta.displayName || meta.name || label;
+            picture = typeof meta.picture === 'string' && meta.picture.length > 0 ? meta.picture : null;
+        } catch {
+            /* ignore */
+        }
+        hits.push(buildSearchHit(pk, label, picture));
+        if (hits.length >= 16) {
+            break;
+        }
+    }
+    return hits;
+}
+
+function closeFabMenu() {
+    const menu = document.getElementById('fabMenu');
+    const btn = document.getElementById('fabPlusBtn');
+    if (menu) {
+        menu.hidden = true;
+    }
+    if (btn) {
+        btn.setAttribute('aria-expanded', 'false');
+    }
+}
+
+function toggleFabMenu() {
+    const menu = document.getElementById('fabMenu');
+    const btn = document.getElementById('fabPlusBtn');
+    if (!menu || !btn) {
+        return;
+    }
+    const willOpen = menu.hidden;
+    menu.hidden = !willOpen;
+    btn.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+    if (willOpen) {
+        const first = menu.querySelector('button');
+        if (first) {
+            first.focus();
+        }
+    }
+}
+
+function openNewChatModal() {
+    const modal = document.getElementById('newChatModal');
+    const input = document.getElementById('newChatSearch');
+    const sugg = document.getElementById('newChatSuggestions');
+    const status = document.getElementById('newChatSearchStatus');
+    if (!modal || !input) {
+        return;
+    }
+    closeFabMenu();
+    wineSearchSerial += 1;
+    wineSearchAbort?.abort();
+    if (wineSearchDebounceTimer) {
+        clearTimeout(wineSearchDebounceTimer);
+    }
+    modal.hidden = false;
+    input.value = '';
+    if (sugg) {
+        sugg.innerHTML = '';
+        sugg.hidden = true;
+    }
+    if (status) {
+        status.textContent =
+            'Type a name, paste a full npub, or enter a 64-character hex pubkey. Name search uses nostr.wine (about 1 lookup per second).';
+    }
+    document.body.style.overflow = 'hidden';
+    setTimeout(() => input.focus(), 50);
+}
+
+function closeNewChatModal() {
+    const modal = document.getElementById('newChatModal');
+    if (modal) {
+        modal.hidden = true;
+    }
+    document.body.style.overflow = '';
+    wineSearchAbort?.abort();
+    if (wineSearchDebounceTimer) {
+        clearTimeout(wineSearchDebounceTimer);
+    }
+    wineSearchSerial += 1;
+}
+
+function scheduleNewChatSearch(raw) {
+    wineSearchAbort?.abort();
+    const serial = ++wineSearchSerial;
+    const statusEl = document.getElementById('newChatSearchStatus');
+    const suggEl = document.getElementById('newChatSuggestions');
+
+    if (wineSearchDebounceTimer) {
+        clearTimeout(wineSearchDebounceTimer);
+    }
+
+    wineSearchDebounceTimer = setTimeout(async () => {
+        wineSearchAbort = new AbortController();
+        const { signal } = wineSearchAbort;
+        const q = raw.trim();
+
+        try {
+            if (q.length === 0) {
+                if (statusEl) {
+                    statusEl.textContent =
+                        'Type a name, paste a full npub, or enter a 64-character hex pubkey. Name search uses nostr.wine (about 1 lookup per second).';
+                }
+                if (suggEl) {
+                    suggEl.innerHTML = '';
+                    suggEl.hidden = true;
+                }
+                return;
+            }
+
+            if (q.length < 2 && !/^[a-fA-F0-9]{64}$/.test(q) && !q.startsWith('npub')) {
+                if (statusEl) {
+                    statusEl.textContent = 'Type at least 2 characters to search by name, or paste an npub / hex key.';
+                }
+                if (suggEl) {
+                    suggEl.innerHTML = '';
+                    suggEl.hidden = true;
+                }
+                return;
+            }
+
+            if (statusEl) {
+                statusEl.textContent = 'Searching…';
+            }
+
+            const hits = await fetchNostrUserSuggestions(q, signal);
+            if (serial !== wineSearchSerial) {
+                return;
+            }
+            if (statusEl) {
+                statusEl.textContent = hits.length ? `${hits.length} result(s)` : 'No matches.';
+            }
+            renderNewChatSuggestions(hits);
+        } catch (e) {
+            if (e?.name === 'AbortError') {
+                return;
+            }
+            if (serial !== wineSearchSerial) {
+                return;
+            }
+            console.warn('Nostr search failed:', e);
+            if (statusEl) {
+                statusEl.textContent = 'Search failed. Wait a second and try again (rate limit), or check your connection.';
+            }
+            if (suggEl) {
+                suggEl.innerHTML =
+                    '<div class="new-chat-suggestion-empty" role="status">Could not load suggestions.</div>';
+                suggEl.hidden = false;
+            }
+        }
+    }, 420);
+}
+
+function renderNewChatSuggestions(hits) {
+    const root = document.getElementById('newChatSuggestions');
+    if (!root) {
+        return;
+    }
+    root.innerHTML = '';
+
+    if (!hits.length) {
+        root.innerHTML = '<div class="new-chat-suggestion-empty" role="status">No matches. Try another name or paste an npub.</div>';
+        root.hidden = false;
+        return;
+    }
+
+    for (const hit of hits) {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'new-chat-suggestion';
+        row.setAttribute('role', 'option');
+
+        let avEl;
+        if (hit.picture) {
+            const img = document.createElement('img');
+            img.className = 'new-chat-suggestion-avatar';
+            img.src = hit.picture;
+            img.alt = '';
+            img.loading = 'lazy';
+            img.referrerPolicy = 'no-referrer';
+            img.addEventListener('error', () => {
+                img.replaceWith(makeAvatarPlaceholder(hit));
+            });
+            avEl = img;
+        } else {
+            avEl = makeAvatarPlaceholder(hit);
+        }
+
+        const text = document.createElement('div');
+        text.className = 'new-chat-suggestion-text';
+        const nameEl = document.createElement('div');
+        nameEl.className = 'new-chat-suggestion-name';
+        nameEl.textContent = hit.label;
+        const npubEl = document.createElement('div');
+        npubEl.className = 'new-chat-suggestion-npub';
+        npubEl.textContent = hit.npubDisplay;
+        text.appendChild(nameEl);
+        text.appendChild(npubEl);
+
+        row.appendChild(avEl);
+        row.appendChild(text);
+
+        row.addEventListener('click', () => {
+            void beginChatWithPubkey(hit.pubkey, hit);
+        });
+        root.appendChild(row);
+    }
+    root.hidden = false;
+}
+
+function makeAvatarPlaceholder(hit) {
+    const el = document.createElement('div');
+    el.className = 'new-chat-suggestion-avatar';
+    el.style.display = 'flex';
+    el.style.alignItems = 'center';
+    el.style.justifyContent = 'center';
+    el.style.fontSize = '13px';
+    el.style.fontWeight = '600';
+    el.style.color = '#888';
+    el.textContent = (hit.label || '?').trim().slice(0, 1).toUpperCase();
+    return el;
+}
+
+async function beginChatWithPubkey(hex, hit = null) {
+    const pk = normalizePubkey(hex);
+    if (publicKey && pk === publicKey) {
+        alert('You cannot start a chat with yourself.');
+        return;
+    }
+
+    try {
+        if (!conversations[pk]) {
+            conversations[pk] = [];
+        }
+        if (hit) {
+            userProfiles[pk] = {
+                name: hit.label,
+                display_name: hit.label,
+                picture: hit.picture,
+                about: userProfiles[pk]?.about ?? null,
+            };
+        }
+        await fetchUserProfile(pk);
+        closeNewChatModal();
+        closeFabMenu();
+        openChat(pk);
+    } catch (error) {
+        alert('Could not open chat: ' + (error?.message || String(error)));
+    }
+}
+
+function initNewChatUi() {
+    const fabBtn = document.getElementById('fabPlusBtn');
+    const fabMenu = document.getElementById('fabMenu');
+    const fabNewChat = document.getElementById('fabMenuNewChat');
+    const modal = document.getElementById('newChatModal');
+    const modalClose = document.getElementById('newChatModalClose');
+    const searchInput = document.getElementById('newChatSearch');
+
+    if (fabBtn && fabMenu) {
+        fabBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggleFabMenu();
+        });
+    }
+
+    if (fabNewChat) {
+        fabNewChat.addEventListener('click', () => {
+            openNewChatModal();
+        });
+    }
+
+    document.addEventListener('click', (e) => {
+        if (!fabMenu || fabMenu.hidden) {
+            return;
+        }
+        const t = e.target;
+        if (fabBtn?.contains(t) || fabMenu.contains(t)) {
+            return;
+        }
+        closeFabMenu();
+    });
+
+    if (modal) {
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) {
+                closeNewChatModal();
+            }
+        });
+    }
+    if (modalClose) {
+        modalClose.addEventListener('click', () => closeNewChatModal());
+    }
+
+    if (searchInput) {
+        searchInput.addEventListener('input', () => {
+            scheduleNewChatSearch(searchInput.value);
+        });
+    }
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') {
+            return;
+        }
+        const modalEl = document.getElementById('newChatModal');
+        if (modalEl && !modalEl.hidden) {
+            closeNewChatModal();
+            e.preventDefault();
+            return;
+        }
+        closeFabMenu();
+    });
+}
+
 /** Grapheme-safe emoji list for the in-app picker (Array.from preserves surrogate pairs). */
 const EMOJI_PICKER_CHARS = Array.from(
     '😀😃😄😁😅😂🤣🥲😊😇🙂😉😌😍🥰😘😗😙😚😋😛😜🤪🤑🤗🤭🤔🤐🤨😐😑😏😒🙄😬🤥😪🤤😴🥱😮😯😲😳🥺😦😧😨😰😥😢😭😱😖😣😞😓😩😫🤯🤠🥳🥸😎🤓🧐😕😟🙁☹️😡🤬😈👿🤡💀☠️💩👻👽👾🤖💋💘💝💖💗💓💞💕💟❣️💔❤️🧡💛💚💙💜🤎🖤🤍💯💢💥💫💦💨👋🤚🖐️✋🖖👌🤌✌️🤞🤟🤘🤙👍👎✊👏🙌👐🤲🤝🙏✍️💪🦾🫶👀👂🦻👃🧠💬🗨️👁️💤🔥✨⭐🌟💫⚡🎉🎊✅❌❓❗📌📎🔗🧵🍻☕🫖🎯🏆🎮'
@@ -154,8 +573,11 @@ async function connectWithExtension() {
         document.getElementById('statusDot').classList.add('connected');
         document.getElementById('statusText').textContent = `Connected to ${successfulConnections}/${RELAY_URLS.length} relays`;
         document.getElementById('connectionSetup').style.display = 'none';
-        document.getElementById('newDmSection').style.display = 'block';
         document.body.classList.add('is-authenticated');
+        const fab = document.getElementById('sidebarFab');
+        if (fab) {
+            fab.removeAttribute('hidden');
+        }
         const chatAreaEl = document.getElementById('chatArea');
         if (chatAreaEl) chatAreaEl.removeAttribute('hidden');
 
@@ -532,64 +954,43 @@ async function handleGiftWrappedMessage(giftWrap) {
     }
 }
 
+function lastConversationSortTime(conv) {
+    if (!conv || conv.length === 0) {
+        return 0;
+    }
+    return conv[conv.length - 1].timestamp;
+}
+
 function updateConversationsList() {
     const list = document.getElementById('conversationsList');
     list.innerHTML = '';
 
-    Object.keys(conversations).sort((a, b) => {
-        const lastA = conversations[a][conversations[a].length - 1];
-        const lastB = conversations[b][conversations[b].length - 1];
-        return lastB.timestamp - lastA.timestamp;
-    }).forEach(pubkey => {
-        const conv = conversations[pubkey];
-        const lastMsg = conv[conv.length - 1];
+    Object.keys(conversations)
+        .sort((a, b) => lastConversationSortTime(conversations[b]) - lastConversationSortTime(conversations[a]))
+        .forEach((pubkey) => {
+            const conv = conversations[pubkey];
+            const lastMsg = conv.length > 0 ? conv[conv.length - 1] : null;
 
-        const item = document.createElement('div');
-        item.className = 'conversation-item' + (currentChat === pubkey ? ' active' : '');
-        item.onclick = () => openChat(pubkey);
+            const item = document.createElement('div');
+            item.className = 'conversation-item' + (currentChat === pubkey ? ' active' : '');
+            item.onclick = () => openChat(pubkey);
 
-        const displayName = getDisplayName(pubkey);
-        const shortPubkey = pubkey.slice(0, 8) + '...' + pubkey.slice(-8);
-        const dateIndicator = formatConversationDate(lastMsg.timestamp);
-        item.innerHTML = `
+            const displayName = getDisplayName(pubkey);
+            const dateIndicator = lastMsg ? formatConversationDate(lastMsg.timestamp) : '';
+            const preview = lastMsg
+                ? `${lastMsg.content.substring(0, 50)}${lastMsg.content.length > 50 ? '...' : ''}`
+                : 'No messages yet';
+
+            item.innerHTML = `
             <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 4px;">
                 <div class="conversation-pubkey">${displayName}</div>
                 <div class="conversation-date">${dateIndicator}</div>
             </div>
-            <div class="conversation-preview">${lastMsg.content.substring(0, 50)}${lastMsg.content.length > 50 ? '...' : ''}</div>
+            <div class="conversation-preview">${preview}</div>
         `;
 
-        list.appendChild(item);
-    });
-}
-
-async function startNewConversation() {
-    let pubkeyInput = document.getElementById('newDmPubkey').value.trim();
-
-    if (!pubkeyInput) {
-        alert('Please enter a recipient pubkey');
-        return;
-    }
-
-    try {
-        if (pubkeyInput.startsWith('npub')) {
-            const decoded = nip19.decode(pubkeyInput);
-            pubkeyInput = decoded.data;
-        }
-        pubkeyInput = normalizePubkey(pubkeyInput);
-
-        if (!conversations[pubkeyInput]) {
-            conversations[pubkeyInput] = [];
-        }
-
-        // Fetch user profile
-        await fetchUserProfile(pubkeyInput);
-
-        openChat(pubkeyInput);
-        document.getElementById('newDmPubkey').value = '';
-    } catch (error) {
-        alert('Invalid pubkey: ' + error.message);
-    }
+            list.appendChild(item);
+        });
 }
 
 function isMobileLayout() {
@@ -605,13 +1006,14 @@ function openChat(pubkey) {
     document.getElementById('emptyState').style.display = 'none';
     document.getElementById('chatView').style.display = 'flex';
 
-    updateChatHeader(pubkey);
-    displayMessages(pubkey);
-    updateConversationsList();
-
+    // Show the chat column before measuring scroll (mobile hides it until this class is set).
     if (isMobileLayout()) {
         setMobileChatPanel(true);
     }
+
+    updateChatHeader(pubkey);
+    displayMessages(pubkey);
+    updateConversationsList();
 }
 
 function backToConversations() {
@@ -742,7 +1144,15 @@ function displayMessages(pubkey) {
         container.appendChild(div);
     });
 
-    container.scrollTop = container.scrollHeight;
+    const scrollToBottom = () => {
+        container.scrollTop = container.scrollHeight;
+    };
+    scrollToBottom();
+    // After flex/mobile layout paints, scrollHeight is final — rAF ensures we land on the latest message.
+    requestAnimationFrame(() => {
+        scrollToBottom();
+        requestAnimationFrame(scrollToBottom);
+    });
 }
 
 async function sendMessage() {
@@ -900,7 +1310,6 @@ async function createAndPublishGiftWrap(seal, recipientPubkey, publishRelays, re
 
 // Make functions available globally for onclick handlers
 window.connectWithExtension = connectWithExtension;
-window.startNewConversation = startNewConversation;
 window.sendMessage = sendMessage;
 
 // Initialize DOM event listeners when DOM is ready
@@ -934,5 +1343,6 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     initEmojiPicker();
+    initNewChatUi();
 });
 
