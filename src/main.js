@@ -34,6 +34,10 @@ const pendingReactionsByMessageId = new Map();
 const QUICK_REACTIONS = ['🤙', '💜', '👍', '😂', '🚀'];
 const EXTRA_REACTIONS = ['🔥', '👏', '🙏', '🎉', '👀', '💯', '🤯', '🥲', '😎', '🤔'];
 const LIGHTNING_INVOICE_RE = /(lightning:)?(ln(?:bc|tb|bcrt|sb)[0-9a-z]+)/i;
+/** Detect bare http(s) URLs in message text for links / inline images (DOM-built, no HTML injection). */
+const HTTP_URL_IN_TEXT_RE = /\bhttps?:\/\/[^\s<>"'`]+/gi;
+/** Blob URLs for decrypted kind-15 previews — revoked when the message list re-renders. */
+const activeMessageBlobUrls = new Set();
 const CONVERSATION_REPAIR_LOOKBACK_SECS = 14 * 24 * 60 * 60;
 const CONVERSATION_REPAIR_LIMIT = 1200;
 const CONVERSATION_REPAIR_COOLDOWN_MS = 15000;
@@ -918,6 +922,45 @@ function getRumorConversationPubkey(rumor, authorPubkey) {
     return conversationPubkey;
 }
 
+/** First tag value for name (NIP-17 file tags, etc.). */
+function rumorTagValue(tags, name) {
+    if (!Array.isArray(tags)) return '';
+    const row = tags.find((t) => t[0] === name && typeof t[1] === 'string' && t[1].length);
+    return row ? row[1] : '';
+}
+
+/** NIP-17 kind 15 file message — content is file URL; tags carry crypto metadata. */
+function parseKind15FileMeta(rumor) {
+    const url = typeof rumor.content === 'string' ? rumor.content.trim() : '';
+    if (!url) return null;
+    const tags = rumor.tags;
+    return {
+        fileType: rumorTagValue(tags, 'file-type') || 'application/octet-stream',
+        url,
+        encryptionAlgorithm: rumorTagValue(tags, 'encryption-algorithm'),
+        decryptionKey: rumorTagValue(tags, 'decryption-key'),
+        decryptionNonce: rumorTagValue(tags, 'decryption-nonce'),
+        xHash: rumorTagValue(tags, 'x'),
+        thumbUrl: rumorTagValue(tags, 'thumb'),
+        dim: rumorTagValue(tags, 'dim'),
+        blurhash: rumorTagValue(tags, 'blurhash')
+    };
+}
+
+function formatConversationPreview(msg) {
+    if (!msg) return 'No messages yet';
+    if (msg.kind === 15 && msg.fileMeta) {
+        const ft = msg.fileMeta.fileType || '';
+        if (ft.startsWith('image/')) return '📷 Photo';
+        if (ft.startsWith('audio/')) return '🎵 Audio';
+        if (ft.startsWith('video/')) return '🎬 Video';
+        return '📎 File';
+    }
+    const c = typeof msg.content === 'string' ? msg.content : '';
+    if (!c) return '—';
+    return `${c.substring(0, 50)}${c.length > 50 ? '...' : ''}`;
+}
+
 function normalizeReactionContent(content) {
     if (typeof content !== 'string') return null;
     const c = content.trim();
@@ -942,6 +985,276 @@ function parseBolt11InvoiceFromText(content) {
         cleanedText,
         decoded
     };
+}
+
+function revokeActiveMessageBlobs() {
+    for (const u of activeMessageBlobUrls) {
+        try {
+            URL.revokeObjectURL(u);
+        } catch {
+            /* ignore */
+        }
+    }
+    activeMessageBlobUrls.clear();
+}
+
+function trimUrlTrailingPunctuation(url) {
+    let u = url;
+    while (u.length && /[.,;:!?)\]}>'"\u201d\u2019]$/.test(u)) {
+        u = u.slice(0, -1);
+    }
+    return u;
+}
+
+function looksLikeDirectImageUrl(url) {
+    return /\.(png|jpe?g|gif|webp|avif|svg)(\?|#|$)/i.test(url);
+}
+
+function isSafeHttpUrl(url) {
+    try {
+        const u = new URL(url);
+        return u.protocol === 'http:' || u.protocol === 'https:';
+    } catch {
+        return false;
+    }
+}
+
+function hexToBytes(hex) {
+    const s = String(hex || '')
+        .replace(/^0x/i, '')
+        .replace(/\s/g, '');
+    if (!s.length || s.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(s)) {
+        return null;
+    }
+    const out = new Uint8Array(s.length / 2);
+    for (let i = 0; i < out.length; i++) {
+        out[i] = parseInt(s.slice(i * 2, i * 2 + 2), 16);
+    }
+    return out;
+}
+
+async function sha256HexOfBuffer(buf) {
+    const digest = await crypto.subtle.digest('SHA-256', buf);
+    return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function decryptAesGcmRaw(keyBytes, ivBytes, cipherWithTag) {
+    const cryptoKey = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['decrypt']);
+    return new Uint8Array(
+        await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBytes }, cryptoKey, cipherWithTag)
+    );
+}
+
+/**
+ * Try NIP-17 kind-15 AES-GCM: ciphertext at URL, `x` = SHA-256 of ciphertext.
+ * @returns {Promise<string|null>} object URL for decrypted bytes
+ */
+async function tryDecryptKind15ToBlobUrl(meta) {
+    if (!meta?.url || !isSafeHttpUrl(meta.url) || meta.encryptionAlgorithm !== 'aes-gcm') return null;
+    const keyBytes = hexToBytes(meta.decryptionKey);
+    const nonceBytes = hexToBytes(meta.decryptionNonce);
+    if (!keyBytes || !nonceBytes) return null;
+    if (![16, 24, 32].includes(keyBytes.length)) return null;
+    if (![12, 16].includes(nonceBytes.length)) return null;
+
+    let res;
+    try {
+        res = await fetch(meta.url, { mode: 'cors', credentials: 'omit' });
+    } catch {
+        return null;
+    }
+    if (!res.ok) return null;
+    const buf = await res.arrayBuffer();
+    const ct = new Uint8Array(buf);
+
+    if (meta.xHash) {
+        const expected = meta.xHash.replace(/^0x/i, '').toLowerCase();
+        try {
+            const h = await sha256HexOfBuffer(ct);
+            if (h !== expected) return null;
+        } catch {
+            return null;
+        }
+    }
+
+    let plain;
+    try {
+        plain = await decryptAesGcmRaw(keyBytes, nonceBytes, ct);
+    } catch {
+        return null;
+    }
+
+    const mime =
+        typeof meta.fileType === 'string' && meta.fileType.startsWith('image/')
+            ? meta.fileType
+            : 'application/octet-stream';
+    const blob = new Blob([plain], { type: mime });
+    const blobUrl = URL.createObjectURL(blob);
+    activeMessageBlobUrls.add(blobUrl);
+    return blobUrl;
+}
+
+/**
+ * Append text with http(s) links and inline images (safe DOM only).
+ * @param {HTMLElement} parent
+ * @param {string} text
+ * @param {{ bare?: boolean }} [opts] — bare: omit .message-text (e.g. nested in file card)
+ */
+function appendRichMessageContent(parent, text, opts = {}) {
+    if (text == null || text === '') return;
+    const inner = document.createElement('div');
+    inner.className = opts.bare ? 'message-text-rich' : 'message-text message-text-rich';
+    fillRichTextInto(inner, String(text));
+    parent.appendChild(inner);
+}
+
+function fillRichTextInto(el, text) {
+    el.textContent = '';
+    if (!text) return;
+
+    const re = new RegExp(HTTP_URL_IN_TEXT_RE.source, HTTP_URL_IN_TEXT_RE.flags);
+    let last = 0;
+    let m;
+    let any = false;
+    while ((m = re.exec(text)) !== null) {
+        any = true;
+        if (m.index > last) {
+            el.appendChild(document.createTextNode(text.slice(last, m.index)));
+        }
+        const raw = m[0];
+        const url = trimUrlTrailingPunctuation(raw);
+        last = m.index + raw.length;
+
+        if (!isSafeHttpUrl(url)) {
+            el.appendChild(document.createTextNode(raw));
+            continue;
+        }
+
+        if (looksLikeDirectImageUrl(url)) {
+            const wrap = document.createElement('div');
+            wrap.className = 'message-inline-image-wrap';
+            const link = document.createElement('a');
+            link.href = url;
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            link.className = 'message-inline-image-link';
+            const img = document.createElement('img');
+            img.className = 'message-inline-image';
+            img.alt = '';
+            img.loading = 'lazy';
+            img.decoding = 'async';
+            img.referrerPolicy = 'no-referrer';
+            img.src = url;
+            img.addEventListener(
+                'error',
+                () => {
+                    wrap.replaceChildren();
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.target = '_blank';
+                    a.rel = 'noopener noreferrer';
+                    a.className = 'message-link';
+                    a.textContent = url;
+                    wrap.appendChild(a);
+                },
+                { once: true }
+            );
+            link.appendChild(img);
+            wrap.appendChild(link);
+            el.appendChild(wrap);
+        } else {
+            const a = document.createElement('a');
+            a.href = url;
+            a.target = '_blank';
+            a.rel = 'noopener noreferrer';
+            a.className = 'message-link';
+            a.textContent = url;
+            el.appendChild(a);
+        }
+    }
+    if (!any) {
+        el.textContent = text;
+        return;
+    }
+    if (last < text.length) {
+        el.appendChild(document.createTextNode(text.slice(last)));
+    }
+}
+
+function appendInlineImageFromBlobUrl(parent, blobUrl) {
+    const wrap = document.createElement('div');
+    wrap.className = 'message-inline-image-wrap';
+    const img = document.createElement('img');
+    img.className = 'message-inline-image';
+    img.alt = '';
+    img.decoding = 'async';
+    img.src = blobUrl;
+    wrap.appendChild(img);
+    parent.appendChild(wrap);
+}
+
+/**
+ * Kind 15 image: try AES-GCM decrypt, else direct <img> if URL is reachable as image.
+ */
+async function loadKind15ImagePreview(previewEl, meta) {
+    previewEl.textContent = '';
+    if (!meta?.fileType?.startsWith('image/')) {
+        previewEl.hidden = true;
+        return;
+    }
+    previewEl.hidden = false;
+
+    const loading = document.createElement('div');
+    loading.className = 'file-message-preview-loading';
+    loading.textContent = 'Loading…';
+    previewEl.appendChild(loading);
+
+    const tryBlob = await tryDecryptKind15ToBlobUrl(meta);
+    if (tryBlob) {
+        loading.remove();
+        appendInlineImageFromBlobUrl(previewEl, tryBlob);
+        return;
+    }
+
+    if (!meta.encryptionAlgorithm && meta.url && isSafeHttpUrl(meta.url) && looksLikeDirectImageUrl(meta.url)) {
+        loading.remove();
+        const wrap = document.createElement('div');
+        wrap.className = 'message-inline-image-wrap';
+        const link = document.createElement('a');
+        link.href = meta.url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.className = 'message-inline-image-link';
+        const img = document.createElement('img');
+        img.className = 'message-inline-image';
+        img.alt = '';
+        img.loading = 'lazy';
+        img.referrerPolicy = 'no-referrer';
+        img.src = meta.url;
+        img.addEventListener(
+            'error',
+            () => {
+                wrap.replaceChildren();
+                const err = document.createElement('div');
+                err.className = 'file-message-preview-note';
+                err.textContent = 'Could not load image (check link or CORS).';
+                wrap.appendChild(err);
+            },
+            { once: true }
+        );
+        link.appendChild(img);
+        wrap.appendChild(link);
+        previewEl.appendChild(wrap);
+        return;
+    }
+
+    if (meta.encryptionAlgorithm === 'aes-gcm' && meta.url) {
+        loading.className = 'file-message-preview-note';
+        loading.textContent = 'Could not decrypt or fetch image (CORS, key, or format).';
+        return;
+    }
+
+    loading.remove();
 }
 
 async function payLightningInvoice(invoice) {
@@ -994,7 +1307,7 @@ function handleReactionRumor(rumor, conversationPubkey, authorPubkey) {
     const kindTag = Array.isArray(rumor.tags)
         ? rumor.tags.find((t) => t[0] === 'k' && typeof t[1] === 'string')
         : null;
-    if (kindTag && kindTag[1] !== '14') {
+    if (kindTag && kindTag[1] !== '14' && kindTag[1] !== '15') {
         return false;
     }
 
@@ -1118,7 +1431,7 @@ async function handleGiftWrappedMessage(giftWrap, options = {}) {
             return;
         }
 
-        // Step 3: Decrypt the seal to get the rumor (kind 14)
+        // Step 3: Decrypt the seal to get the rumor (NIP-17: kind 14 chat, 7 reaction, 15 file, …)
         // NIP-44 peer for decrypt is always the *other* party in the conversation:
         // - Incoming: seal author is the sender → decrypt(seal.pubkey, …).
         // - Our own sender copy: seal author is us; payload was encrypt(recipient, …) → decrypt(recipient, …).
@@ -1157,9 +1470,9 @@ async function handleGiftWrappedMessage(giftWrap, options = {}) {
         const rumor = JSON.parse(rumorJSON);
         console.log('Unwrapped rumor:', { kind: rumor.kind, pubkey: rumor.pubkey, content: rumor.content?.substring(0, 50) });
         
-        // Step 4: Support chat messages (kind 14) and reactions (kind 7 to kind 14 e-tag target).
-        if (rumor.kind !== 14 && rumor.kind !== 7) {
-            console.error('Expected kind 14 or 7 rumor, got:', rumor.kind);
+        // Step 4: NIP-17 — kind 14 DMs, kind 7 reactions, kind 15 file messages (see nips/17.md).
+        if (rumor.kind !== 14 && rumor.kind !== 7 && rumor.kind !== 15) {
+            console.warn('Unsupported rumor kind inside gift wrap (skipping):', rumor.kind);
             return;
         }
 
@@ -1206,13 +1519,31 @@ async function handleGiftWrappedMessage(giftWrap, options = {}) {
             return;
         }
 
-        conversations[conversationPubkey].push({
-            id: rumor.id,
-            content: rumor.content,
-            timestamp: rumor.created_at,
-            from: authorPubkey,
-            actualTimestamp: giftWrap.created_at
-        });
+        if (rumor.kind === 15) {
+            const fileMeta = parseKind15FileMeta(rumor);
+            if (!fileMeta) {
+                console.warn('Kind 15 rumor missing file URL; skipping', { id: rumor.id });
+                return;
+            }
+            conversations[conversationPubkey].push({
+                id: rumor.id,
+                kind: 15,
+                content: rumor.content,
+                fileMeta,
+                timestamp: rumor.created_at,
+                from: authorPubkey,
+                actualTimestamp: giftWrap.created_at
+            });
+        } else {
+            conversations[conversationPubkey].push({
+                id: rumor.id,
+                kind: 14,
+                content: rumor.content,
+                timestamp: rumor.created_at,
+                from: authorPubkey,
+                actualTimestamp: giftWrap.created_at
+            });
+        }
         applyPendingReactionsForMessage(conversationPubkey, conversations[conversationPubkey][conversations[conversationPubkey].length - 1]);
 
         conversations[conversationPubkey].sort((a, b) => a.timestamp - b.timestamp);
@@ -1382,9 +1713,7 @@ function updateConversationsList() {
         const lastMsg = conv.length > 0 ? conv[conv.length - 1] : null;
         const displayName = getDisplayName(pubkey);
         const dateIndicator = lastMsg ? formatConversationDate(lastMsg.timestamp) : '';
-        const preview = lastMsg
-            ? `${lastMsg.content.substring(0, 50)}${lastMsg.content.length > 50 ? '...' : ''}`
-            : 'No messages yet';
+        const preview = formatConversationPreview(lastMsg);
 
         let row = conversationItemEls.get(pubkey);
         if (!row) {
@@ -1546,6 +1875,7 @@ function formatConversationDate(timestamp) {
 
 function displayMessages(pubkey) {
     const container = document.getElementById('messagesContainer');
+    revokeActiveMessageBlobs();
     container.innerHTML = '';
 
     if (!conversations[pubkey]) return;
@@ -1570,14 +1900,69 @@ function displayMessages(pubkey) {
 
         const bodyEl = document.createElement('div');
         bodyEl.className = 'message-body';
+        if (msg.kind === 15 && msg.fileMeta) {
+            div.classList.add('message-invoice');
+            const fileCard = document.createElement('div');
+            fileCard.className = 'file-message-card';
+
+            const top = document.createElement('div');
+            top.className = 'file-message-card-top';
+
+            const header = document.createElement('div');
+            header.className = 'file-message-card-header';
+            header.textContent = (msg.fileMeta.fileType || '').startsWith('image/') ? 'Image' : 'File';
+
+            const copyIconBtn = document.createElement('button');
+            copyIconBtn.type = 'button';
+            copyIconBtn.className = 'invoice-copy-icon-btn';
+            copyIconBtn.setAttribute('aria-label', 'Copy file URL');
+            copyIconBtn.textContent = '⧉';
+            copyIconBtn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                try {
+                    await navigator.clipboard.writeText(msg.fileMeta.url);
+                    copyIconBtn.textContent = '✓';
+                    setTimeout(() => {
+                        copyIconBtn.textContent = '⧉';
+                    }, 1200);
+                } catch {
+                    copyIconBtn.textContent = '!';
+                    setTimeout(() => {
+                        copyIconBtn.textContent = '⧉';
+                    }, 1200);
+                }
+            });
+            top.appendChild(header);
+            top.appendChild(copyIconBtn);
+
+            const meta = document.createElement('div');
+            meta.className = 'file-message-card-meta';
+            meta.textContent = msg.fileMeta.fileType;
+            if (msg.fileMeta.dim) {
+                meta.textContent += ` · ${msg.fileMeta.dim}`;
+            }
+
+            const previewEl = document.createElement('div');
+            previewEl.className = 'file-message-preview';
+            previewEl.hidden = !(msg.fileMeta.fileType || '').startsWith('image/');
+
+            const linkRow = document.createElement('div');
+            linkRow.className = 'file-message-card-links';
+            appendRichMessageContent(linkRow, msg.fileMeta.url, { bare: true });
+
+            fileCard.appendChild(top);
+            fileCard.appendChild(meta);
+            fileCard.appendChild(previewEl);
+            fileCard.appendChild(linkRow);
+            bodyEl.appendChild(fileCard);
+
+            void loadKind15ImagePreview(previewEl, msg.fileMeta);
+        } else {
         const parsedInvoice = parseBolt11InvoiceFromText(msg.content);
         if (parsedInvoice) {
             div.classList.add('message-invoice');
             if (parsedInvoice.cleanedText) {
-                const text = document.createElement('div');
-                text.className = 'message-text';
-                text.textContent = parsedInvoice.cleanedText;
-                bodyEl.appendChild(text);
+                appendRichMessageContent(bodyEl, parsedInvoice.cleanedText);
             }
 
             const invoiceCard = document.createElement('div');
@@ -1652,7 +2037,8 @@ function displayMessages(pubkey) {
             invoiceCard.appendChild(actions);
             bodyEl.appendChild(invoiceCard);
         } else {
-            bodyEl.textContent = msg.content;
+            appendRichMessageContent(bodyEl, typeof msg.content === 'string' ? msg.content : '');
+        }
         }
 
         const timeEl = document.createElement('div');
@@ -1675,6 +2061,9 @@ function displayMessages(pubkey) {
             picker.hidden = true;
             picker.dataset.expanded = 'false';
 
+            const quickRow = document.createElement('div');
+            quickRow.className = 'message-reaction-picker-quick';
+
             QUICK_REACTIONS.forEach((emoji) => {
                 const b = document.createElement('button');
                 b.type = 'button';
@@ -1685,7 +2074,7 @@ function displayMessages(pubkey) {
                     picker.hidden = true;
                     void sendReactionToMessage(msg, emoji);
                 });
-                picker.appendChild(b);
+                quickRow.appendChild(b);
             });
 
             const moreBtn = document.createElement('button');
@@ -1693,7 +2082,8 @@ function displayMessages(pubkey) {
             moreBtn.className = 'message-reaction-option message-reaction-option--more';
             moreBtn.setAttribute('aria-label', 'More reactions');
             moreBtn.textContent = '+';
-            picker.appendChild(moreBtn);
+            quickRow.appendChild(moreBtn);
+            picker.appendChild(quickRow);
 
             const expanded = document.createElement('div');
             expanded.className = 'message-reaction-expanded';
@@ -1872,7 +2262,7 @@ async function sendReactionToMessage(message, emoji) {
             kind: 7,
             pubkey: publicKey,
             created_at: now,
-            tags: [['e', message.id], ['k', '14'], ['p', currentChat]],
+            tags: [['e', message.id], ['k', String(message.kind || 14)], ['p', currentChat]],
             content: normalizedEmoji
         };
         rumor.id = getEventHash(rumor);
@@ -1913,6 +2303,7 @@ async function sendMessage() {
 
         conversations[currentChat].push({
             id: rumor.id,
+            kind: 14,
             content: content,
             timestamp: now,
             from: publicKey
