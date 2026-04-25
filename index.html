@@ -88,8 +88,11 @@
                     </button>
                     <div class="chat-header-avatar" id="currentChatAvatar" aria-hidden="true"></div>
                     <div class="chat-header-text">
-                        <div class="chat-with">Chatting with</div>
                         <div class="chat-pubkey" id="currentChatPubkey"></div>
+                        <div class="chat-npub-row">
+                            <div class="chat-npub" id="currentChatNpub"></div>
+                            <button type="button" class="chat-npub-copy-btn" id="copyCurrentChatNpubBtn" aria-label="Copy npub">⧉</button>
+                        </div>
                     </div>
                 </div>
 
@@ -99,7 +102,7 @@
                     <div class="chat-input-shell">
                         <div class="chat-input-main">
                             <button type="button" class="emoji-toggle-btn" id="emojiToggleBtn" aria-label="Open emoji picker" aria-expanded="false" aria-controls="emojiPanel" title="Emoji">
-                                <span class="emoji-toggle-icon" aria-hidden="true">😊</span>
+                                <span class="emoji-toggle-icon" aria-hidden="true">🧡</span>
                             </button>
                             <textarea class="chat-input" id="messageInput" placeholder="Type a message..." rows="1" enterkeyhint="send"></textarea>
                             <button type="button" class="send-btn" id="sendBtn" onclick="sendMessage()" aria-label="Send message">

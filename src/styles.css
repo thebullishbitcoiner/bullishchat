@@ -435,6 +435,19 @@ body.is-authenticated .conversations-list {
     transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
 }
 
+.avatar-image {
+    opacity: 0;
+    transition:
+        opacity 180ms ease-out,
+        transform 0.18s ease,
+        box-shadow 0.18s ease,
+        border-color 0.18s ease;
+}
+
+.avatar-image.is-loaded {
+    opacity: 1;
+}
+
 .conversation-item:hover .avatar {
     transform: translateY(-1px);
     border-color: rgba(232, 137, 12, 0.5);
@@ -575,12 +588,6 @@ body.is-authenticated .conversations-list {
     flex: 1;
 }
 
-.chat-with {
-    font-size: 14px;
-    color: #888;
-    margin-bottom: 4px;
-}
-
 .chat-pubkey {
     font-size: 16px;
     font-weight: 600;
@@ -588,6 +595,49 @@ body.is-authenticated .conversations-list {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    margin-bottom: 3px;
+}
+
+.chat-npub-row {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    min-width: 0;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: 0;
+    padding: 2px 2px 2px 10px;
+    max-width: 100%;
+}
+
+.chat-npub {
+    min-width: 0;
+    flex: 1;
+    font-size: 12px;
+    color: #8d877b;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    line-height: 1.2;
+}
+
+.chat-npub-copy-btn {
+    width: 26px;
+    height: 26px;
+    border: none;
+    background: rgba(255, 255, 255, 0.1);
+    color: #d8d0c6;
+    border-radius: 0;
+    font-size: 13px;
+    line-height: 1;
+    padding: 0;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.chat-npub-copy-btn:hover {
+    background: rgba(255, 255, 255, 0.12);
 }
 
 .messages-container {
@@ -785,10 +835,14 @@ body.is-authenticated .conversations-list {
     border: 1px solid rgba(255, 255, 255, 0.2);
     background: rgba(16, 16, 16, 0.86);
     color: #f0ede8;
-    font-size: 11px;
+    font-size: 16px;
+    font-weight: 700;
     line-height: 1;
     cursor: pointer;
     padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .message-reaction-picker {
@@ -814,6 +868,8 @@ body.is-authenticated .conversations-list {
 
 .message-reaction-picker[data-expanded='true'] {
     border-radius: 14px;
+    width: 186px;
+    max-width: 186px;
 }
 
 .message.received .message-reaction-picker {
@@ -846,9 +902,12 @@ body.is-authenticated .conversations-list {
 .message-reaction-expanded {
     width: 100%;
     display: grid;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
+    grid-template-columns: repeat(5, 28px);
+    justify-content: center;
+    justify-items: center;
+    align-content: start;
     gap: 6px;
-    padding-top: 2px;
+    padding-top: 4px;
 }
 
 .message-reaction-expanded[hidden] {
@@ -970,6 +1029,7 @@ body.is-authenticated .conversations-list {
     border-top: 1px solid #1f1f1f;
     background: #0f0f0f;
     flex-shrink: 0;
+    padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px));
 }
 
 .chat-input-shell {
@@ -1078,10 +1138,10 @@ body.is-authenticated .conversations-list {
     right: 0;
     bottom: calc(100% + 10px);
     z-index: 40;
-    max-height: min(240px, 42vh);
+    max-height: min(220px, 40vh);
     overflow-y: auto;
     overflow-x: hidden;
-    padding: 10px;
+    padding: 8px;
     background: #121212;
     border: 1px solid #2a2a2a;
     border-radius: 0;
@@ -1091,8 +1151,8 @@ body.is-authenticated .conversations-list {
 
 .emoji-grid {
     display: grid;
-    grid-template-columns: repeat(8, minmax(0, 1fr));
-    gap: 4px;
+    grid-template-columns: repeat(9, minmax(0, 1fr));
+    gap: 2px;
 }
 
 .emoji-cell {
@@ -1101,14 +1161,15 @@ body.is-authenticated .conversations-list {
     border: none;
     background: transparent;
     border-radius: 0;
-    font-size: 1.35rem;
-    line-height: 1.2;
+    font-size: 1.2rem;
+    line-height: 1;
     cursor: pointer;
     aspect-ratio: 1;
     display: flex;
     align-items: center;
     justify-content: center;
     transition: background 0.12s ease;
+    min-height: 28px;
 }
 
 .emoji-cell:hover,
@@ -1528,8 +1589,9 @@ body.is-authenticated .sidebar-fab:not([hidden]) {
         flex: 1 1 auto;
         width: 100%;
         min-width: 0;
-        min-height: 100vh;
-        min-height: 100dvh;
+        min-height: 0;
+        height: 100%;
+        max-height: 100dvh;
     }
 
     .chat-back-btn {
@@ -1546,7 +1608,7 @@ body.is-authenticated .sidebar-fab:not([hidden]) {
     }
 
     .emoji-grid {
-        grid-template-columns: repeat(7, minmax(0, 1fr));
+        grid-template-columns: repeat(8, minmax(0, 1fr));
     }
 }
 

@@ -1,6 +1,7 @@
 import pkg from '../package.json';
 import { SimplePool, generateSecretKey, getPublicKey, getEventHash, finalizeEvent } from 'nostr-tools';
 import * as nip19 from 'nostr-tools/nip19';
+import { decodeInvoice } from '@getalby/lightning-tools/bolt11';
 // Note: nip44 is used for both ephemeral key operations and user key operations
 // We check if extension provides nip44, otherwise fall back to library (but need private key access)
 import { encrypt as nip44Encrypt, decrypt as nip44Decrypt, getConversationKey } from 'nostr-tools/nip44';
@@ -9,8 +10,7 @@ import { encrypt as nip44Encrypt, decrypt as nip44Decrypt, getConversationKey } 
 const RELAY_URLS = [
     'wss://relay.0xchat.com',
     'wss://relay.damus.io',
-    'wss://relay.primal.net',
-    'wss://auth.nostr1.com'
+    'wss://relay.primal.net'
 ];
 
 let pool = null;
@@ -32,7 +32,7 @@ const seenRumorIds = new Set();
 /** Reactions that arrive before their target message. */
 const pendingReactionsByMessageId = new Map();
 const QUICK_REACTIONS = ['🤙', '💜', '👍', '😂', '🚀'];
-const EXTRA_REACTIONS = ['🔥', '👏', '🙏', '🎉', '👀', '💯', '🤯', '🥲', '😎', '🤔', '✅', '❌'];
+const EXTRA_REACTIONS = ['🔥', '👏', '🙏', '🎉', '👀', '💯', '🤯', '🥲', '😎', '🤔'];
 const LIGHTNING_INVOICE_RE = /(lightning:)?(ln(?:bc|tb|bcrt|sb)[0-9a-z]+)/i;
 
 let conversationsListUpdateQueued = false;
@@ -866,34 +866,15 @@ function parseBolt11InvoiceFromText(content) {
     if (!match) return null;
     const invoice = (match[2] || '').toLowerCase();
     if (!invoice) return null;
+    const decoded = decodeInvoice(invoice);
+    if (!decoded) return null;
 
     const cleanedText = (content.replace(match[0], ' ').replace(/\s+/g, ' ').trim());
     return {
         invoice,
-        cleanedText
+        cleanedText,
+        decoded
     };
-}
-
-function formatBolt11Amount(invoice) {
-    const m = invoice.match(/^ln(?:bc|tb|bcrt|sb)(\d+)?([munp]?)/i);
-    if (!m || !m[1]) return null;
-    const value = Number(m[1]);
-    if (!Number.isFinite(value) || value <= 0) return null;
-    const unit = (m[2] || '').toLowerCase();
-
-    // BOLT11 hrp amount units: m=1e-3 BTC, u=1e-6 BTC, n=1e-9 BTC, p=1e-12 BTC.
-    let sats;
-    if (unit === 'm') sats = value * 100000;
-    else if (unit === 'u') sats = value * 100;
-    else if (unit === 'n') sats = value * 0.1;
-    else if (unit === 'p') sats = value * 0.0001;
-    else sats = value * 100000000;
-
-    if (!Number.isFinite(sats) || sats <= 0) return null;
-    if (sats >= 1) {
-        return `${Math.round(sats).toLocaleString()} sats`;
-    }
-    return `${Math.round(sats * 1000)} msats`;
 }
 
 async function payLightningInvoice(invoice) {
@@ -1219,10 +1200,16 @@ function createAvatarNode(pubkey, className = 'avatar') {
     avatar.className = className;
 
     if (canUsePicture) {
+        avatar.classList.add('avatar-image');
+        avatar.classList.remove('is-loaded');
+        avatar.decoding = 'async';
         avatar.src = picture;
         avatar.alt = '';
         avatar.loading = 'lazy';
         avatar.referrerPolicy = 'no-referrer';
+        avatar.addEventListener('load', () => {
+            avatar.classList.add('is-loaded');
+        }, { once: true });
         avatar.addEventListener('error', () => {
             brokenAvatarUrls.add(picture);
             const fallback = document.createElement('div');
@@ -1254,7 +1241,12 @@ function updateAvatarHost(host, pubkey) {
             host.appendChild(avatar);
         }
         if (avatar.dataset.avatarSrc !== picture) {
+            avatar.classList.add('avatar-image');
+            avatar.classList.remove('is-loaded');
             avatar.dataset.avatarSrc = picture;
+            avatar.addEventListener('load', () => {
+                avatar.classList.add('is-loaded');
+            }, { once: true });
             avatar.src = picture;
         }
         avatar.onerror = () => {
@@ -1381,19 +1373,36 @@ window.backToConversations = backToConversations;
 // Update chat header with display name
 function updateChatHeader(pubkey) {
     const displayName = getDisplayName(pubkey);
-    const shortPubkey = pubkey.slice(0, 16) + '...' + pubkey.slice(-16);
     const avatarHost = document.getElementById('currentChatAvatar');
+    const npubEl = document.getElementById('currentChatNpub');
+    const copyBtn = document.getElementById('copyCurrentChatNpubBtn');
 
     if (avatarHost) {
         updateAvatarHost(avatarHost, pubkey);
     }
-    
-    // Show display name, or short pubkey if no name available
-    const profile = userProfiles[pubkey];
-    if (profile && (profile.display_name || profile.name)) {
-        document.getElementById('currentChatPubkey').textContent = displayName;
-    } else {
-        document.getElementById('currentChatPubkey').textContent = shortPubkey;
+
+    const npub = nip19.npubEncode(pubkey);
+    const npubShort = npub.length > 28 ? `${npub.slice(0, 18)}...${npub.slice(-8)}` : npub;
+    document.getElementById('currentChatPubkey').textContent = displayName;
+
+    if (npubEl) {
+        npubEl.textContent = npubShort;
+        npubEl.title = npub;
+    }
+    if (copyBtn) {
+        copyBtn.onclick = async (e) => {
+            e.stopPropagation();
+            const original = copyBtn.textContent;
+            try {
+                await navigator.clipboard.writeText(npub);
+                copyBtn.textContent = '✓';
+            } catch {
+                copyBtn.textContent = '!';
+            }
+            setTimeout(() => {
+                copyBtn.textContent = original || '⧉';
+            }, 1200);
+        };
     }
 }
 
@@ -1538,7 +1547,9 @@ function displayMessages(pubkey) {
 
             const amount = document.createElement('div');
             amount.className = 'invoice-card-amount';
-            amount.textContent = formatBolt11Amount(parsedInvoice.invoice) || 'Amount encoded in invoice';
+            amount.textContent = parsedInvoice.decoded?.satoshi
+                ? `${Math.round(parsedInvoice.decoded.satoshi).toLocaleString()} sats`
+                : 'Amount encoded in invoice';
 
             const actions = document.createElement('div');
             actions.className = 'invoice-card-actions';
@@ -1589,7 +1600,7 @@ function displayMessages(pubkey) {
             reactBtn.type = 'button';
             reactBtn.className = 'message-react-btn';
             reactBtn.setAttribute('aria-label', 'React to message');
-            reactBtn.textContent = '🤙';
+            reactBtn.textContent = '⋯';
 
             const picker = document.createElement('div');
             picker.className = 'message-reaction-picker';
@@ -1630,6 +1641,7 @@ function displayMessages(pubkey) {
                     picker.hidden = true;
                     expanded.hidden = true;
                     picker.dataset.expanded = 'false';
+                    moreBtn.hidden = false;
                     void sendReactionToMessage(msg, emoji);
                 });
                 expanded.appendChild(b);
@@ -1640,24 +1652,57 @@ function displayMessages(pubkey) {
                 const willOpen = expanded.hidden;
                 expanded.hidden = !willOpen;
                 picker.dataset.expanded = willOpen ? 'true' : 'false';
+                moreBtn.hidden = willOpen;
             });
 
-            reactBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
+            const closeOtherPickers = () => {
                 container.querySelectorAll('.message-reaction-picker').forEach((el) => {
                     if (el !== picker) {
                         el.hidden = true;
                         el.dataset.expanded = 'false';
                         const ex = el.querySelector('.message-reaction-expanded');
                         if (ex) ex.hidden = true;
+                        const mb = el.querySelector('.message-reaction-option--more');
+                        if (mb) mb.hidden = false;
                     }
                 });
-                picker.hidden = !picker.hidden;
+            };
+
+            const togglePicker = (forceOpen = false) => {
+                closeOtherPickers();
+                picker.hidden = forceOpen ? false : !picker.hidden;
                 if (picker.hidden) {
                     picker.dataset.expanded = 'false';
                     expanded.hidden = true;
+                    moreBtn.hidden = false;
                 }
+            };
+
+            reactBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                togglePicker(false);
             });
+
+            let longPressTimer = null;
+            const clearLongPress = () => {
+                if (longPressTimer) {
+                    clearTimeout(longPressTimer);
+                    longPressTimer = null;
+                }
+            };
+
+            div.addEventListener('touchstart', (e) => {
+                if (!isMobileLayout() || e.target.closest('.message-actions')) {
+                    return;
+                }
+                clearLongPress();
+                longPressTimer = setTimeout(() => {
+                    togglePicker(true);
+                }, 420);
+            }, { passive: true });
+            div.addEventListener('touchend', clearLongPress, { passive: true });
+            div.addEventListener('touchcancel', clearLongPress, { passive: true });
+            div.addEventListener('touchmove', clearLongPress, { passive: true });
 
             actionsEl.appendChild(reactBtn);
             picker.appendChild(expanded);
