@@ -34,6 +34,9 @@ const pendingReactionsByMessageId = new Map();
 const QUICK_REACTIONS = ['🤙', '💜', '👍', '😂', '🚀'];
 const EXTRA_REACTIONS = ['🔥', '👏', '🙏', '🎉', '👀', '💯', '🤯', '🥲', '😎', '🤔'];
 const LIGHTNING_INVOICE_RE = /(lightning:)?(ln(?:bc|tb|bcrt|sb)[0-9a-z]+)/i;
+const CONVERSATION_REPAIR_LOOKBACK_SECS = 14 * 24 * 60 * 60;
+const CONVERSATION_REPAIR_LIMIT = 1200;
+const CONVERSATION_REPAIR_COOLDOWN_MS = 15000;
 
 let conversationsListUpdateQueued = false;
 function queueConversationsListUpdate() {
@@ -64,6 +67,8 @@ let wineSearchAbort = null;
 let wineSearchDebounceTimer = null;
 let wineSearchSerial = 0;
 let lastNostrWineRequestMs = 0;
+const conversationRepairLastRunMs = new Map();
+let conversationRepairInFlight = false;
 let isInboxLoading = false;
 
 function setInboxLoading(loading) {
@@ -837,6 +842,55 @@ async function fetchHistoricalGiftWraps() {
     prefetchMissingConversationProfiles();
 }
 
+/** Lightweight repair fetch when opening a thread to catch relay-lagged/missed events. */
+async function fetchConversationRepair(conversationPubkey) {
+    if (!pool || !publicKey || !conversationPubkey || conversationRepairInFlight) {
+        return;
+    }
+
+    const now = Date.now();
+    const last = conversationRepairLastRunMs.get(conversationPubkey) || 0;
+    if (now - last < CONVERSATION_REPAIR_COOLDOWN_MS) {
+        return;
+    }
+    conversationRepairLastRunMs.set(conversationPubkey, now);
+    conversationRepairInFlight = true;
+
+    try {
+        const since = Math.floor(Date.now() / 1000) - CONVERSATION_REPAIR_LOOKBACK_SECS;
+        const filter = {
+            kinds: [1059],
+            '#p': [publicKey],
+            since,
+            limit: CONVERSATION_REPAIR_LIMIT
+        };
+        const maxWait = Math.min(30000, 12000 + dmRelayUrls.length * 3500);
+        const events = await pool.querySync(dmRelayUrls, filter, { maxWait });
+        if (!events.length) {
+            return;
+        }
+
+        events.sort((a, b) => a.created_at - b.created_at);
+        for (const ev of events) {
+            try {
+                await handleGiftWrappedMessage(ev, { suppressUi: true });
+            } catch (err) {
+                console.warn('Conversation repair failed on event:', err);
+            }
+        }
+    } catch (err) {
+        console.warn('Conversation repair query failed:', err);
+    } finally {
+        conversationRepairInFlight = false;
+    }
+
+    updateConversationsList();
+    if (currentChat === conversationPubkey) {
+        displayMessages(conversationPubkey);
+        updateChatHeader(conversationPubkey);
+    }
+}
+
 /** After bulk inbox load, fetch display names without blocking decrypt. */
 function prefetchMissingConversationProfiles() {
     for (const pubkey of Object.keys(conversations)) {
@@ -1375,6 +1429,7 @@ function openChat(pubkey) {
     updateChatHeader(pubkey);
     displayMessages(pubkey);
     updateConversationsList();
+    void fetchConversationRepair(currentChat);
 }
 
 function backToConversations() {
