@@ -1127,6 +1127,12 @@ body.is-authenticated .sidebar-fab:not([hidden]) {
 
 /* Mobile: full-width list OR full-width chat; back returns to list */
 @media (max-width: 768px) {
+    /* Dynamic viewport avoids iOS toolbar clipping so the message list can scroll fully */
+    body.is-authenticated .container {
+        height: 100dvh;
+        max-height: 100dvh;
+    }
+
     /* Override body.is-authenticated .sidebar { width: 320px } so list + chat toggle works */
     body.is-authenticated .sidebar {
         width: 100%;

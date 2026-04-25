@@ -548,7 +548,21 @@ async function connectWithExtension() {
             return;
         }
 
-        // Create pool and connect to multiple relays
+        if (messageSubscription) {
+            try {
+                messageSubscription.close();
+            } catch (e) {
+                console.warn('Closing previous message subscription:', e);
+            }
+            messageSubscription = null;
+        }
+        if (pool) {
+            try {
+                pool.destroy();
+            } catch (e) {
+                console.warn('Destroying previous relay pool:', e);
+            }
+        }
         pool = new SimplePool();
         
         // Connect to all relays
@@ -584,14 +598,10 @@ async function connectWithExtension() {
         const inboxRelayStatuses = await mergeOwnInboxRelays();
         setRelayStatusTooltip(relayResults, inboxRelayStatuses);
 
-        // Load stored gift wraps explicitly (some relays are slow or flaky with REQ+live overlap),
-        // then keep a live subscription for new events.
-        setTimeout(() => {
-            void (async () => {
-                await fetchHistoricalGiftWraps();
-                subscribeToMessages();
-            })();
-        }, 1000);
+        // Live subscription first so new mail arrives while history is still decrypting.
+        // History uses paginated querySync (relay result caps) + batched UI updates for mobile perf.
+        subscribeToMessages();
+        void fetchHistoricalGiftWraps();
 
     } catch (error) {
         alert('Connection failed: ' + error.message);
@@ -728,28 +738,71 @@ function getRandomPastTimestamp() {
     return twoDaysAgo + Math.floor(Math.random() * (2 * 24 * 60 * 60));
 }
 
-/** Pull stored kind 1059 from relays (closes after EOSE per relay; more reliable than live sub alone). */
+/** Pull stored kind 1059 from relays (paginated: many relays cap events per REQ). */
 async function fetchHistoricalGiftWraps() {
     if (!pool || !publicKey) return;
 
-    const filter = {
-        kinds: [1059],
-        '#p': [publicKey]
-    };
+    const pageLimit = 500;
+    const maxPages = 40;
+    const maxWait = Math.min(65000, 20000 + dmRelayUrls.length * 6000);
+    let until;
 
     try {
-        const events = await pool.querySync(dmRelayUrls, filter, { maxWait: 25000 });
-        console.log(`📥 Historical gift wraps: ${events.length} event(s) from querySync`);
-        events.sort((a, b) => a.created_at - b.created_at);
-        for (const ev of events) {
-            try {
-                await handleGiftWrappedMessage(ev);
-            } catch (err) {
-                console.error('Error handling historical gift wrap:', err);
+        for (let page = 0; page < maxPages; page++) {
+            const filter = {
+                kinds: [1059],
+                '#p': [publicKey],
+                limit: pageLimit
+            };
+            if (until !== undefined) {
+                filter.until = until;
             }
+
+            const events = await pool.querySync(dmRelayUrls, filter, { maxWait });
+            if (!events.length) {
+                break;
+            }
+
+            events.sort((a, b) => a.created_at - b.created_at);
+            const oldest = events[0].created_at;
+
+            for (const ev of events) {
+                try {
+                    await handleGiftWrappedMessage(ev, { suppressUi: true });
+                } catch (err) {
+                    console.error('Error handling historical gift wrap:', err);
+                }
+            }
+
+            if (events.length < pageLimit) {
+                break;
+            }
+            until = oldest - 1;
         }
     } catch (err) {
         console.warn('Historical gift wrap querySync failed:', err);
+    }
+
+    updateConversationsList();
+    if (currentChat) {
+        displayMessages(currentChat);
+        updateChatHeader(currentChat);
+    }
+    prefetchMissingConversationProfiles();
+}
+
+/** After bulk inbox load, fetch display names without blocking decrypt. */
+function prefetchMissingConversationProfiles() {
+    for (const pubkey of Object.keys(conversations)) {
+        if (userProfiles[pubkey]) {
+            continue;
+        }
+        void fetchUserProfile(pubkey).then(() => {
+            updateConversationsList();
+            if (currentChat === pubkey) {
+                updateChatHeader(pubkey);
+            }
+        });
     }
 }
 
@@ -795,7 +848,8 @@ function subscribeToMessages() {
     console.log('💡 Querying all historical messages (no time limit)');
 }
 
-async function handleGiftWrappedMessage(giftWrap) {
+/** @param {{ suppressUi?: boolean }} [options] — suppressUi: batch historical load (single UI refresh at end). */
+async function handleGiftWrappedMessage(giftWrap, options = {}) {
     if (seenGiftWrapEventIds.has(giftWrap.id)) {
         return;
     }
@@ -931,14 +985,20 @@ async function handleGiftWrappedMessage(giftWrap) {
 
         conversations[conversationPubkey].sort((a, b) => a.timestamp - b.timestamp);
 
-        if (!userProfiles[conversationPubkey]) {
-            await fetchUserProfile(conversationPubkey);
-        }
-
-        updateConversationsList();
-        if (currentChat === conversationPubkey) {
-            displayMessages(conversationPubkey);
-            updateChatHeader(conversationPubkey);
+        if (!options.suppressUi) {
+            updateConversationsList();
+            if (currentChat === conversationPubkey) {
+                displayMessages(conversationPubkey);
+                updateChatHeader(conversationPubkey);
+            }
+            if (!userProfiles[conversationPubkey]) {
+                void fetchUserProfile(conversationPubkey).then(() => {
+                    updateConversationsList();
+                    if (currentChat === conversationPubkey) {
+                        updateChatHeader(conversationPubkey);
+                    }
+                });
+            }
         }
 
     } catch (error) {
