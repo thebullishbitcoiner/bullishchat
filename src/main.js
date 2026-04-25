@@ -64,6 +64,15 @@ let wineSearchAbort = null;
 let wineSearchDebounceTimer = null;
 let wineSearchSerial = 0;
 let lastNostrWineRequestMs = 0;
+let isInboxLoading = false;
+
+function setInboxLoading(loading) {
+    isInboxLoading = Boolean(loading);
+    const el = document.getElementById('inboxLoading');
+    if (el) {
+        el.hidden = !isInboxLoading;
+    }
+}
 
 function buildSearchHit(pubkey, displayName = null, picture = null) {
     const pk = normalizePubkey(pubkey);
@@ -627,6 +636,7 @@ async function connectWithExtension() {
         }
         const chatAreaEl = document.getElementById('chatArea');
         if (chatAreaEl) chatAreaEl.removeAttribute('hidden');
+        setInboxLoading(true);
 
         const inboxRelayStatuses = await mergeOwnInboxRelays();
         setRelayStatusTooltip(relayResults, inboxRelayStatuses);
@@ -634,9 +644,12 @@ async function connectWithExtension() {
         // Live subscription first so new mail arrives while history is still decrypting.
         // History uses paginated querySync (relay result caps) + batched UI updates for mobile perf.
         subscribeToMessages();
-        void fetchHistoricalGiftWraps();
+        void fetchHistoricalGiftWraps().finally(() => {
+            setInboxLoading(false);
+        });
 
     } catch (error) {
+        setInboxLoading(false);
         alert('Connection failed: ' + error.message);
         console.error(error);
     }

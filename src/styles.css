@@ -401,6 +401,21 @@ body.is-authenticated .conversations-list {
     padding-bottom: calc(76px + env(safe-area-inset-bottom, 0px));
 }
 
+.inbox-loading {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    font-size: 12px;
+    color: #8d877b;
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    background: #11110f;
+}
+
+.inbox-loading[hidden] {
+    display: none !important;
+}
+
 .conversation-item {
     padding: 16px 20px;
     border-bottom: 1px solid #1a1a1a;
