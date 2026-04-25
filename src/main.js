@@ -23,6 +23,39 @@ let messageSubscription = null; // Store the message subscription
 let dmRelayUrls = [...RELAY_URLS];
 /** Dedupe kind 1059 events across historical query + live subscription (same id from many relays) */
 const seenGiftWrapEventIds = new Set();
+/** Avoid repeatedly trying broken image URLs (prevents avatar flash/retry loops). */
+const brokenAvatarUrls = new Set();
+/** Keep stable DOM rows for conversation list to avoid avatar remount flicker. */
+const conversationItemEls = new Map();
+/** De-dupe rumors that can arrive via sender/receiver copies across relays. */
+const seenRumorIds = new Set();
+/** Reactions that arrive before their target message. */
+const pendingReactionsByMessageId = new Map();
+const QUICK_REACTIONS = ['🤙', '💜', '👍', '😂', '🚀'];
+const EXTRA_REACTIONS = ['🔥', '👏', '🙏', '🎉', '👀', '💯', '🤯', '🥲', '😎', '🤔', '✅', '❌'];
+const LIGHTNING_INVOICE_RE = /(lightning:)?(ln(?:bc|tb|bcrt|sb)[0-9a-z]+)/i;
+
+let conversationsListUpdateQueued = false;
+function queueConversationsListUpdate() {
+    if (conversationsListUpdateQueued) return;
+    conversationsListUpdateQueued = true;
+    requestAnimationFrame(() => {
+        conversationsListUpdateQueued = false;
+        updateConversationsList();
+    });
+}
+
+let chatHeaderUpdateQueued = false;
+function queueChatHeaderUpdate(pubkey) {
+    if (currentChat !== pubkey || chatHeaderUpdateQueued) return;
+    chatHeaderUpdateQueued = true;
+    requestAnimationFrame(() => {
+        chatHeaderUpdateQueued = false;
+        if (currentChat === pubkey) {
+            updateChatHeader(pubkey);
+        }
+    });
+}
 
 /** nostr.wine search (kind 0); free tier ~1 req/s */
 const NOSTR_WINE_SEARCH_URL = 'https://api.nostr.wine/search';
@@ -798,12 +831,150 @@ function prefetchMissingConversationProfiles() {
             continue;
         }
         void fetchUserProfile(pubkey).then(() => {
-            updateConversationsList();
-            if (currentChat === pubkey) {
-                updateChatHeader(pubkey);
-            }
+            queueConversationsListUpdate();
+            queueChatHeaderUpdate(pubkey);
         });
     }
+}
+
+function getRumorConversationPubkey(rumor, authorPubkey) {
+    let conversationPubkey = authorPubkey;
+    if (authorPubkey === publicKey) {
+        const pTag = Array.isArray(rumor.tags)
+            ? rumor.tags.find((t) => t[0] === 'p' && typeof t[1] === 'string' && t[1].length)
+            : null;
+        if (!pTag) {
+            return null;
+        }
+        conversationPubkey = normalizePubkey(pTag[1]);
+    }
+    return conversationPubkey;
+}
+
+function normalizeReactionContent(content) {
+    if (typeof content !== 'string') return null;
+    const c = content.trim();
+    if (!c) return null;
+    if (c === '+') return '👍';
+    if (c === '-') return '👎';
+    return c.slice(0, 16);
+}
+
+function parseBolt11InvoiceFromText(content) {
+    if (typeof content !== 'string') return null;
+    const match = content.match(LIGHTNING_INVOICE_RE);
+    if (!match) return null;
+    const invoice = (match[2] || '').toLowerCase();
+    if (!invoice) return null;
+
+    const cleanedText = (content.replace(match[0], ' ').replace(/\s+/g, ' ').trim());
+    return {
+        invoice,
+        cleanedText
+    };
+}
+
+function formatBolt11Amount(invoice) {
+    const m = invoice.match(/^ln(?:bc|tb|bcrt|sb)(\d+)?([munp]?)/i);
+    if (!m || !m[1]) return null;
+    const value = Number(m[1]);
+    if (!Number.isFinite(value) || value <= 0) return null;
+    const unit = (m[2] || '').toLowerCase();
+
+    // BOLT11 hrp amount units: m=1e-3 BTC, u=1e-6 BTC, n=1e-9 BTC, p=1e-12 BTC.
+    let sats;
+    if (unit === 'm') sats = value * 100000;
+    else if (unit === 'u') sats = value * 100;
+    else if (unit === 'n') sats = value * 0.1;
+    else if (unit === 'p') sats = value * 0.0001;
+    else sats = value * 100000000;
+
+    if (!Number.isFinite(sats) || sats <= 0) return null;
+    if (sats >= 1) {
+        return `${Math.round(sats).toLocaleString()} sats`;
+    }
+    return `${Math.round(sats * 1000)} msats`;
+}
+
+async function payLightningInvoice(invoice) {
+    if (!invoice) {
+        throw new Error('Missing invoice');
+    }
+    const webln = window.webln;
+    if (!webln || typeof webln.sendPayment !== 'function') {
+        throw new Error('No WebLN wallet found');
+    }
+    if (typeof webln.enable === 'function') {
+        await webln.enable();
+    }
+    return webln.sendPayment(invoice);
+}
+
+function applyReactionToMessage(message, emoji, fromPubkey) {
+    if (!message.reactions) {
+        message.reactions = {};
+    }
+    if (!message.reactions[emoji]) {
+        message.reactions[emoji] = { count: 0, reactors: [] };
+    }
+    const bucket = message.reactions[emoji];
+    if (!bucket.reactors.includes(fromPubkey)) {
+        bucket.reactors.push(fromPubkey);
+        bucket.count += 1;
+    }
+}
+
+function applyPendingReactionsForMessage(conversationPubkey, message) {
+    if (!message?.id) return;
+    const pending = pendingReactionsByMessageId.get(message.id);
+    if (!pending?.length) return;
+
+    for (const reaction of pending) {
+        if (reaction.conversationPubkey !== conversationPubkey) continue;
+        applyReactionToMessage(message, reaction.emoji, reaction.fromPubkey);
+    }
+
+    const remaining = pending.filter((reaction) => reaction.conversationPubkey !== conversationPubkey);
+    if (remaining.length) {
+        pendingReactionsByMessageId.set(message.id, remaining);
+    } else {
+        pendingReactionsByMessageId.delete(message.id);
+    }
+}
+
+function handleReactionRumor(rumor, conversationPubkey, authorPubkey) {
+    const kindTag = Array.isArray(rumor.tags)
+        ? rumor.tags.find((t) => t[0] === 'k' && typeof t[1] === 'string')
+        : null;
+    if (kindTag && kindTag[1] !== '14') {
+        return false;
+    }
+
+    const eTag = Array.isArray(rumor.tags)
+        ? rumor.tags.find((t) => t[0] === 'e' && typeof t[1] === 'string' && t[1].length)
+        : null;
+    if (!eTag) {
+        return false;
+    }
+    const targetMessageId = eTag[1];
+    const emoji = normalizeReactionContent(rumor.content);
+    if (!emoji) {
+        return false;
+    }
+
+    if (!conversations[conversationPubkey]) {
+        conversations[conversationPubkey] = [];
+    }
+
+    const targetMessage = conversations[conversationPubkey].find((m) => m.id === targetMessageId);
+    if (targetMessage) {
+        applyReactionToMessage(targetMessage, emoji, authorPubkey);
+    } else {
+        const pending = pendingReactionsByMessageId.get(targetMessageId) || [];
+        pending.push({ conversationPubkey, emoji, fromPubkey: authorPubkey });
+        pendingReactionsByMessageId.set(targetMessageId, pending);
+    }
+    return true;
 }
 
 function subscribeToMessages() {
@@ -938,9 +1109,9 @@ async function handleGiftWrappedMessage(giftWrap, options = {}) {
         const rumor = JSON.parse(rumorJSON);
         console.log('Unwrapped rumor:', { kind: rumor.kind, pubkey: rumor.pubkey, content: rumor.content?.substring(0, 50) });
         
-        // Step 4: Verify it's a chat message (kind 14)
-        if (rumor.kind !== 14) {
-            console.error('Expected kind 14 rumor, got:', rumor.kind);
+        // Step 4: Support chat messages (kind 14) and reactions (kind 7 to kind 14 e-tag target).
+        if (rumor.kind !== 14 && rumor.kind !== 7) {
+            console.error('Expected kind 14 or 7 rumor, got:', rumor.kind);
             return;
         }
 
@@ -951,23 +1122,35 @@ async function handleGiftWrappedMessage(giftWrap, options = {}) {
         }
 
         const authorPubkey = normalizePubkey(rumor.pubkey);
-        // Peer thread key: incoming DMs use the author; our own messages (sender copy, kind 14
-        // pubkey = us) must use the recipient from the rumor's p tag so they land in the same
-        // conversation as openChat(peer) / sendMessage().
-        let conversationPubkey = authorPubkey;
-        if (authorPubkey === publicKey) {
-            const pTag = Array.isArray(rumor.tags)
-                ? rumor.tags.find((t) => t[0] === 'p' && typeof t[1] === 'string' && t[1].length)
-                : null;
-            if (!pTag) {
-                console.error('Outgoing kind 14 missing p tag; cannot assign conversation');
-                return;
-            }
-            conversationPubkey = normalizePubkey(pTag[1]);
+        const conversationPubkey = getRumorConversationPubkey(rumor, authorPubkey);
+        if (!conversationPubkey) {
+            console.error('Outgoing rumor missing p tag; cannot assign conversation');
+            return;
         }
 
         if (!conversations[conversationPubkey]) {
             conversations[conversationPubkey] = [];
+        }
+
+        if (rumor.id) {
+            if (seenRumorIds.has(rumor.id)) {
+                return;
+            }
+            seenRumorIds.add(rumor.id);
+        }
+
+        if (rumor.kind === 7) {
+            const applied = handleReactionRumor(rumor, conversationPubkey, authorPubkey);
+            if (!applied) {
+                return;
+            }
+            if (!options.suppressUi) {
+                if (currentChat === conversationPubkey) {
+                    displayMessages(conversationPubkey);
+                }
+                updateConversationsList();
+            }
+            return;
         }
 
         // Same logical message can appear locally first, then again from our self-addressed gift wrap
@@ -982,6 +1165,7 @@ async function handleGiftWrappedMessage(giftWrap, options = {}) {
             from: authorPubkey,
             actualTimestamp: giftWrap.created_at
         });
+        applyPendingReactionsForMessage(conversationPubkey, conversations[conversationPubkey][conversations[conversationPubkey].length - 1]);
 
         conversations[conversationPubkey].sort((a, b) => a.timestamp - b.timestamp);
 
@@ -993,10 +1177,8 @@ async function handleGiftWrappedMessage(giftWrap, options = {}) {
             }
             if (!userProfiles[conversationPubkey]) {
                 void fetchUserProfile(conversationPubkey).then(() => {
-                    updateConversationsList();
-                    if (currentChat === conversationPubkey) {
-                        updateChatHeader(conversationPubkey);
-                    }
+                    queueConversationsListUpdate();
+                    queueChatHeaderUpdate(conversationPubkey);
                 });
             }
         }
@@ -1021,36 +1203,150 @@ function lastConversationSortTime(conv) {
     return conv[conv.length - 1].timestamp;
 }
 
+function avatarInitialFromLabel(label, pubkey = '') {
+    const base = (label || '').trim();
+    if (base) {
+        return base.slice(0, 1).toUpperCase();
+    }
+    return (pubkey || '?').slice(0, 1).toUpperCase();
+}
+
+function createAvatarNode(pubkey, className = 'avatar') {
+    const profile = userProfiles[pubkey];
+    const picture = typeof profile?.picture === 'string' ? profile.picture.trim() : '';
+    const canUsePicture = picture.length > 0 && !brokenAvatarUrls.has(picture);
+    const avatar = canUsePicture ? document.createElement('img') : document.createElement('div');
+    avatar.className = className;
+
+    if (canUsePicture) {
+        avatar.src = picture;
+        avatar.alt = '';
+        avatar.loading = 'lazy';
+        avatar.referrerPolicy = 'no-referrer';
+        avatar.addEventListener('error', () => {
+            brokenAvatarUrls.add(picture);
+            const fallback = document.createElement('div');
+            fallback.className = className;
+            fallback.textContent = avatarInitialFromLabel(getDisplayName(pubkey), pubkey);
+            avatar.replaceWith(fallback);
+        });
+        return avatar;
+    }
+
+    avatar.textContent = avatarInitialFromLabel(getDisplayName(pubkey), pubkey);
+    return avatar;
+}
+
+function updateAvatarHost(host, pubkey) {
+    const profile = userProfiles[pubkey];
+    const picture = typeof profile?.picture === 'string' ? profile.picture.trim() : '';
+    const canUsePicture = picture.length > 0 && !brokenAvatarUrls.has(picture);
+    let avatar = host.firstElementChild;
+
+    if (canUsePicture) {
+        if (!(avatar instanceof HTMLImageElement)) {
+            host.innerHTML = '';
+            avatar = document.createElement('img');
+            avatar.className = 'avatar';
+            avatar.alt = '';
+            avatar.referrerPolicy = 'no-referrer';
+            avatar.decoding = 'async';
+            host.appendChild(avatar);
+        }
+        if (avatar.dataset.avatarSrc !== picture) {
+            avatar.dataset.avatarSrc = picture;
+            avatar.src = picture;
+        }
+        avatar.onerror = () => {
+            brokenAvatarUrls.add(picture);
+            updateAvatarHost(host, pubkey);
+        };
+        return;
+    }
+
+    if (!(avatar instanceof HTMLDivElement)) {
+        host.innerHTML = '';
+        avatar = document.createElement('div');
+        avatar.className = 'avatar';
+        host.appendChild(avatar);
+    }
+    avatar.textContent = avatarInitialFromLabel(getDisplayName(pubkey), pubkey);
+}
+
+function createConversationItem(pubkey) {
+    const item = document.createElement('div');
+    item.className = 'conversation-item';
+    item.onclick = () => openChat(pubkey);
+
+    const main = document.createElement('div');
+    main.className = 'conversation-item-main';
+
+    const avatarHost = document.createElement('div');
+    avatarHost.className = 'conversation-item-avatar-host';
+
+    const content = document.createElement('div');
+    content.className = 'conversation-item-content';
+
+    const top = document.createElement('div');
+    top.className = 'conversation-item-top';
+
+    const nameEl = document.createElement('div');
+    nameEl.className = 'conversation-pubkey';
+
+    const dateEl = document.createElement('div');
+    dateEl.className = 'conversation-date';
+
+    const previewEl = document.createElement('div');
+    previewEl.className = 'conversation-preview';
+
+    top.appendChild(nameEl);
+    top.appendChild(dateEl);
+    content.appendChild(top);
+    content.appendChild(previewEl);
+    main.appendChild(avatarHost);
+    main.appendChild(content);
+    item.appendChild(main);
+
+    return { item, avatarHost, nameEl, dateEl, previewEl };
+}
+
 function updateConversationsList() {
     const list = document.getElementById('conversationsList');
-    list.innerHTML = '';
+    const orderedPubkeys = Object.keys(conversations).sort(
+        (a, b) => lastConversationSortTime(conversations[b]) - lastConversationSortTime(conversations[a])
+    );
+    const seen = new Set();
 
-    Object.keys(conversations)
-        .sort((a, b) => lastConversationSortTime(conversations[b]) - lastConversationSortTime(conversations[a]))
-        .forEach((pubkey) => {
-            const conv = conversations[pubkey];
-            const lastMsg = conv.length > 0 ? conv[conv.length - 1] : null;
+    for (const pubkey of orderedPubkeys) {
+        seen.add(pubkey);
+        const conv = conversations[pubkey];
+        const lastMsg = conv.length > 0 ? conv[conv.length - 1] : null;
+        const displayName = getDisplayName(pubkey);
+        const dateIndicator = lastMsg ? formatConversationDate(lastMsg.timestamp) : '';
+        const preview = lastMsg
+            ? `${lastMsg.content.substring(0, 50)}${lastMsg.content.length > 50 ? '...' : ''}`
+            : 'No messages yet';
 
-            const item = document.createElement('div');
-            item.className = 'conversation-item' + (currentChat === pubkey ? ' active' : '');
-            item.onclick = () => openChat(pubkey);
+        let row = conversationItemEls.get(pubkey);
+        if (!row) {
+            row = createConversationItem(pubkey);
+            conversationItemEls.set(pubkey, row);
+        }
 
-            const displayName = getDisplayName(pubkey);
-            const dateIndicator = lastMsg ? formatConversationDate(lastMsg.timestamp) : '';
-            const preview = lastMsg
-                ? `${lastMsg.content.substring(0, 50)}${lastMsg.content.length > 50 ? '...' : ''}`
-                : 'No messages yet';
+        row.item.className = 'conversation-item' + (currentChat === pubkey ? ' active' : '');
+        row.nameEl.textContent = displayName;
+        row.dateEl.textContent = dateIndicator;
+        row.previewEl.textContent = preview;
+        updateAvatarHost(row.avatarHost, pubkey);
+        list.appendChild(row.item);
+    }
 
-            item.innerHTML = `
-            <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 4px;">
-                <div class="conversation-pubkey">${displayName}</div>
-                <div class="conversation-date">${dateIndicator}</div>
-            </div>
-            <div class="conversation-preview">${preview}</div>
-        `;
-
-            list.appendChild(item);
-        });
+    for (const [pubkey, row] of conversationItemEls.entries()) {
+        if (!seen.has(pubkey)) {
+            row.item.remove();
+            conversationItemEls.delete(pubkey);
+        }
+    }
 }
 
 function isMobileLayout() {
@@ -1086,6 +1382,11 @@ window.backToConversations = backToConversations;
 function updateChatHeader(pubkey) {
     const displayName = getDisplayName(pubkey);
     const shortPubkey = pubkey.slice(0, 16) + '...' + pubkey.slice(-16);
+    const avatarHost = document.getElementById('currentChatAvatar');
+
+    if (avatarHost) {
+        updateAvatarHost(avatarHost, pubkey);
+    }
     
     // Show display name, or short pubkey if no name available
     const profile = userProfiles[pubkey];
@@ -1192,14 +1493,202 @@ function displayMessages(pubkey) {
 
         const bodyEl = document.createElement('div');
         bodyEl.className = 'message-body';
-        bodyEl.textContent = msg.content;
+        const parsedInvoice = parseBolt11InvoiceFromText(msg.content);
+        if (parsedInvoice) {
+            div.classList.add('message-invoice');
+            if (parsedInvoice.cleanedText) {
+                const text = document.createElement('div');
+                text.className = 'message-text';
+                text.textContent = parsedInvoice.cleanedText;
+                bodyEl.appendChild(text);
+            }
+
+            const invoiceCard = document.createElement('div');
+            invoiceCard.className = 'invoice-card';
+
+            const top = document.createElement('div');
+            top.className = 'invoice-card-top';
+
+            const header = document.createElement('div');
+            header.className = 'invoice-card-header';
+            header.textContent = 'Lightning Invoice';
+
+            const copyIconBtn = document.createElement('button');
+            copyIconBtn.type = 'button';
+            copyIconBtn.className = 'invoice-copy-icon-btn';
+            copyIconBtn.setAttribute('aria-label', 'Copy invoice');
+            copyIconBtn.textContent = '⧉';
+            copyIconBtn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                try {
+                    await navigator.clipboard.writeText(parsedInvoice.invoice);
+                    copyIconBtn.textContent = '✓';
+                    setTimeout(() => {
+                        copyIconBtn.textContent = '⧉';
+                    }, 1200);
+                } catch {
+                    copyIconBtn.textContent = '!';
+                    setTimeout(() => {
+                        copyIconBtn.textContent = '⧉';
+                    }, 1200);
+                }
+            });
+            top.appendChild(header);
+            top.appendChild(copyIconBtn);
+
+            const amount = document.createElement('div');
+            amount.className = 'invoice-card-amount';
+            amount.textContent = formatBolt11Amount(parsedInvoice.invoice) || 'Amount encoded in invoice';
+
+            const actions = document.createElement('div');
+            actions.className = 'invoice-card-actions';
+            const payBtn = document.createElement('button');
+            payBtn.type = 'button';
+            payBtn.className = 'invoice-pay-btn';
+            payBtn.textContent = 'Pay';
+            payBtn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const previous = payBtn.textContent;
+                payBtn.disabled = true;
+                payBtn.textContent = 'Paying…';
+                try {
+                    await payLightningInvoice(parsedInvoice.invoice);
+                    payBtn.textContent = 'Paid';
+                    setTimeout(() => {
+                        payBtn.textContent = previous;
+                        payBtn.disabled = false;
+                    }, 1400);
+                } catch (err) {
+                    payBtn.textContent = err?.message?.includes('No WebLN') ? 'No wallet' : 'Failed';
+                    setTimeout(() => {
+                        payBtn.textContent = previous;
+                        payBtn.disabled = false;
+                    }, 1400);
+                }
+            });
+            actions.appendChild(payBtn);
+
+            invoiceCard.appendChild(top);
+            invoiceCard.appendChild(amount);
+            invoiceCard.appendChild(actions);
+            bodyEl.appendChild(invoiceCard);
+        } else {
+            bodyEl.textContent = msg.content;
+        }
 
         const timeEl = document.createElement('div');
         timeEl.className = 'message-time';
         timeEl.textContent = formatTimestamp(msg.timestamp);
 
+        const canReact = Boolean(msg.id);
+        if (canReact) {
+            const actionsEl = document.createElement('div');
+            actionsEl.className = 'message-actions';
+
+            const reactBtn = document.createElement('button');
+            reactBtn.type = 'button';
+            reactBtn.className = 'message-react-btn';
+            reactBtn.setAttribute('aria-label', 'React to message');
+            reactBtn.textContent = '🤙';
+
+            const picker = document.createElement('div');
+            picker.className = 'message-reaction-picker';
+            picker.hidden = true;
+            picker.dataset.expanded = 'false';
+
+            QUICK_REACTIONS.forEach((emoji) => {
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'message-reaction-option';
+                b.textContent = emoji;
+                b.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    picker.hidden = true;
+                    void sendReactionToMessage(msg, emoji);
+                });
+                picker.appendChild(b);
+            });
+
+            const moreBtn = document.createElement('button');
+            moreBtn.type = 'button';
+            moreBtn.className = 'message-reaction-option message-reaction-option--more';
+            moreBtn.setAttribute('aria-label', 'More reactions');
+            moreBtn.textContent = '+';
+            picker.appendChild(moreBtn);
+
+            const expanded = document.createElement('div');
+            expanded.className = 'message-reaction-expanded';
+            expanded.hidden = true;
+
+            EXTRA_REACTIONS.forEach((emoji) => {
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'message-reaction-option';
+                b.textContent = emoji;
+                b.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    picker.hidden = true;
+                    expanded.hidden = true;
+                    picker.dataset.expanded = 'false';
+                    void sendReactionToMessage(msg, emoji);
+                });
+                expanded.appendChild(b);
+            });
+
+            moreBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const willOpen = expanded.hidden;
+                expanded.hidden = !willOpen;
+                picker.dataset.expanded = willOpen ? 'true' : 'false';
+            });
+
+            reactBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                container.querySelectorAll('.message-reaction-picker').forEach((el) => {
+                    if (el !== picker) {
+                        el.hidden = true;
+                        el.dataset.expanded = 'false';
+                        const ex = el.querySelector('.message-reaction-expanded');
+                        if (ex) ex.hidden = true;
+                    }
+                });
+                picker.hidden = !picker.hidden;
+                if (picker.hidden) {
+                    picker.dataset.expanded = 'false';
+                    expanded.hidden = true;
+                }
+            });
+
+            actionsEl.appendChild(reactBtn);
+            picker.appendChild(expanded);
+            actionsEl.appendChild(picker);
+            div.appendChild(actionsEl);
+        }
+
         div.appendChild(bodyEl);
         div.appendChild(timeEl);
+
+        const reactionEntries = msg.reactions ? Object.entries(msg.reactions) : [];
+        if (reactionEntries.length > 0) {
+            div.classList.add('has-reactions');
+            const reactionsEl = document.createElement('div');
+            reactionsEl.className = 'message-reactions';
+
+            reactionEntries
+                .sort((a, b) => a[0].localeCompare(b[0]))
+                .forEach(([emoji, info], index) => {
+                    const pill = document.createElement('span');
+                    pill.className = 'message-reaction-pill';
+                    pill.textContent = emoji;
+                    pill.style.setProperty('--reaction-index', String(index));
+                    if (Array.isArray(info?.reactors) && info.reactors.includes(publicKey)) {
+                        pill.classList.add('is-own-reaction');
+                    }
+                    reactionsEl.appendChild(pill);
+                });
+
+            div.appendChild(reactionsEl);
+        }
 
         container.appendChild(div);
     });
@@ -1215,6 +1704,71 @@ function displayMessages(pubkey) {
     });
 }
 
+async function publishRumorAsGiftWrap(rumor, peerPubkey) {
+    const recipientInboxRelays = await fetchKind10050Relays(peerPubkey);
+    const publishRelays =
+        recipientInboxRelays.length > 0
+            ? [...new Set([...recipientInboxRelays, ...RELAY_URLS])]
+            : [...RELAY_URLS];
+    const relayHint = recipientInboxRelays[0] || null;
+
+    const sealContent = JSON.stringify(rumor);
+    const encryptedRumor = await window.nostr.nip44.encrypt(peerPubkey, sealContent);
+
+    const sealTemplate = {
+        kind: 13,
+        pubkey: publicKey,
+        created_at: getRandomPastTimestamp(),
+        tags: relayHint ? [['p', peerPubkey, relayHint]] : [['p', peerPubkey]],
+        content: encryptedRumor
+    };
+
+    const signedSeal = await window.nostr.signEvent(sealTemplate);
+    const sealToWrap = {
+        kind: 13,
+        pubkey: signedSeal.pubkey ?? sealTemplate.pubkey,
+        created_at: signedSeal.created_at ?? sealTemplate.created_at,
+        tags: signedSeal.tags?.length ? signedSeal.tags : sealTemplate.tags,
+        content: sealTemplate.content,
+        id: signedSeal.id,
+        sig: signedSeal.sig
+    };
+    if (!sealToWrap.id || !sealToWrap.sig) {
+        throw new Error('Signing failed: missing id or sig');
+    }
+
+    await createAndPublishGiftWrap(sealToWrap, peerPubkey, publishRelays, relayHint);
+
+    const selfInbox = await fetchKind10050Relays(publicKey);
+    const selfPublishRelays =
+        selfInbox.length > 0 ? [...new Set([...selfInbox, ...RELAY_URLS])] : publishRelays;
+    await createAndPublishGiftWrap(sealToWrap, publicKey, selfPublishRelays, selfInbox[0] || null);
+}
+
+async function sendReactionToMessage(message, emoji) {
+    if (!currentChat || !message?.id) return;
+    const normalizedEmoji = normalizeReactionContent(emoji);
+    if (!normalizedEmoji) return;
+
+    applyReactionToMessage(message, normalizedEmoji, publicKey);
+    displayMessages(currentChat);
+
+    try {
+        const now = Math.floor(Date.now() / 1000);
+        const rumor = {
+            kind: 7,
+            pubkey: publicKey,
+            created_at: now,
+            tags: [['e', message.id], ['k', '14'], ['p', currentChat]],
+            content: normalizedEmoji
+        };
+        rumor.id = getEventHash(rumor);
+        await publishRumorAsGiftWrap(rumor, currentChat);
+    } catch (error) {
+        console.warn('Failed to publish reaction:', error);
+    }
+}
+
 async function sendMessage() {
     const input = document.getElementById('messageInput');
     const sendBtn = document.getElementById('sendBtn');
@@ -1228,62 +1782,16 @@ async function sendMessage() {
     try {
         const now = Math.floor(Date.now() / 1000);
 
-        const recipientInboxRelays = await fetchKind10050Relays(currentChat);
-        const publishRelays =
-            recipientInboxRelays.length > 0
-                ? [...new Set([...recipientInboxRelays, ...RELAY_URLS])]
-                : [...RELAY_URLS];
-        const relayHint = recipientInboxRelays[0] || null;
-
         // Step 1: Create the rumor (kind 14) — unsigned; NIP-17 requires id + created_at (same as nostr-tools createRumor)
         const rumor = {
             kind: 14,
             pubkey: publicKey,
             created_at: now,
-            tags: relayHint ? [['p', currentChat, relayHint]] : [['p', currentChat]],
+            tags: [['p', currentChat]],
             content: content
         };
         rumor.id = getEventHash(rumor);
-
-        // Step 2: Seal the rumor (kind 13)
-        const sealContent = JSON.stringify(rumor);
-        // Use extension's nip44 (we already checked it exists at connection time)
-        const encryptedRumor = await window.nostr.nip44.encrypt(currentChat, sealContent);
-
-        // p tag = DM counterparty for NIP-44. Required so when we reload, decrypt(..., seal) uses the
-        // recipient (encrypt was nip44.encrypt(currentChat, …), not encrypt(self, …)).
-        const sealTemplate = {
-            kind: 13,
-            pubkey: publicKey,
-            created_at: getRandomPastTimestamp(),
-            tags: relayHint ? [['p', currentChat, relayHint]] : [['p', currentChat]],
-            content: encryptedRumor
-        };
-
-        const signedSeal = await window.nostr.signEvent(sealTemplate);
-        // Use the signer output but keep our ciphertext/tags if the extension omits them
-        const sealToWrap = {
-            kind: 13,
-            pubkey: signedSeal.pubkey ?? sealTemplate.pubkey,
-            created_at: signedSeal.created_at ?? sealTemplate.created_at,
-            tags: signedSeal.tags?.length ? signedSeal.tags : sealTemplate.tags,
-            content: sealTemplate.content,
-            id: signedSeal.id,
-            sig: signedSeal.sig
-        };
-        if (!sealToWrap.id || !sealToWrap.sig) {
-            throw new Error('Signing failed: missing id or sig');
-        }
-
-        // Step 3: Gift wrap for recipient (publish to their inbox relays per NIP-17 + defaults)
-        await createAndPublishGiftWrap(sealToWrap, currentChat, publishRelays, relayHint);
-
-        // Step 4: Gift wrap for sender (ourselves) — use our inbox + defaults so our other clients see the same thread
-        const selfInbox = await fetchKind10050Relays(publicKey);
-        const selfPublishRelays =
-            selfInbox.length > 0 ? [...new Set([...selfInbox, ...RELAY_URLS])] : publishRelays;
-        // Sender copy: only use our own inbox relay hint, not the peer's (avoids wrong room on our other clients)
-        await createAndPublishGiftWrap(sealToWrap, publicKey, selfPublishRelays, selfInbox[0] || null);
+        await publishRumorAsGiftWrap(rumor, currentChat);
 
         // Add to local conversation
         if (!conversations[currentChat]) {
