@@ -103,6 +103,7 @@ let customReactionEmojiSet = [];
 let customReactionEmojiUrlMap = {};
 let discoveredEmojiSets = [];
 let settingsEmojiDraftSet = [];
+let mobileCatchupTimer = null;
 
 function splitGraphemes(str) {
     if (!str) return [];
@@ -1444,6 +1445,11 @@ async function fetchKind10050Relays(authorPubkey, options = {}) {
     }
 }
 
+/** Read from both default + discovered inbox relays to reduce missed events on flaky/mobile sockets. */
+function getReadRelayUrls() {
+    return [...new Set([...(dmRelayUrls || []), ...RELAY_URLS])];
+}
+
 /** Connects the pool to the exact relay set and returns statuses. */
 async function connectRelaySet(relays) {
     const statuses = await Promise.all(
@@ -1494,9 +1500,10 @@ function getRandomPastTimestamp() {
 async function fetchHistoricalGiftWraps() {
     if (!pool || !publicKey) return;
 
+    const readRelays = getReadRelayUrls();
     const pageLimit = 500;
     const maxPages = 40;
-    const maxWait = Math.min(65000, 20000 + dmRelayUrls.length * 6000);
+    const maxWait = Math.min(65000, 20000 + readRelays.length * 6000);
     let until;
 
     try {
@@ -1510,7 +1517,7 @@ async function fetchHistoricalGiftWraps() {
                 filter.until = until;
             }
 
-            const events = await pool.querySync(dmRelayUrls, filter, { maxWait });
+            const events = await pool.querySync(readRelays, filter, { maxWait });
             if (!events.length) {
                 break;
             }
@@ -1558,6 +1565,7 @@ async function fetchConversationRepair(conversationPubkey) {
     conversationRepairInFlight = true;
 
     try {
+        const readRelays = getReadRelayUrls();
         const since = Math.floor(Date.now() / 1000) - CONVERSATION_REPAIR_LOOKBACK_SECS;
         const filter = {
             kinds: [1059],
@@ -1565,8 +1573,8 @@ async function fetchConversationRepair(conversationPubkey) {
             since,
             limit: CONVERSATION_REPAIR_LIMIT
         };
-        const maxWait = Math.min(30000, 12000 + dmRelayUrls.length * 3500);
-        const events = await pool.querySync(dmRelayUrls, filter, { maxWait });
+        const maxWait = Math.min(30000, 12000 + readRelays.length * 3500);
+        const events = await pool.querySync(readRelays, filter, { maxWait });
         if (!events.length) {
             return;
         }
@@ -2043,7 +2051,8 @@ function subscribeToMessages() {
     // SimplePool.subscribe automatically queries all connected relays
     // Store the subscription so it stays alive
     console.log('Setting up subscription for publicKey:', publicKey);
-    console.log('Subscribing to relays:', dmRelayUrls);
+    const readRelays = getReadRelayUrls();
+    console.log('Subscribing to relays:', readRelays);
 
     let eventCount = 0;
 
@@ -2056,7 +2065,7 @@ function subscribeToMessages() {
     };
     console.log('Subscription filter:', JSON.stringify(filter, null, 2));
 
-    messageSubscription = pool.subscribe(dmRelayUrls, filter, {
+    messageSubscription = pool.subscribe(readRelays, filter, {
         onevent(event) {
             eventCount++;
             const isDup = seenGiftWrapEventIds.has(event.id);
@@ -2076,8 +2085,29 @@ function subscribeToMessages() {
         }
     });
 
-    console.log('✅ Subscription active - listening for messages on', dmRelayUrls.length, 'relays');
+    console.log('✅ Subscription active - listening for messages on', readRelays.length, 'relays');
     console.log('💡 Querying all historical messages (no time limit)');
+}
+
+function scheduleMobileCatchup(reason = 'unknown') {
+    if (!pool || !publicKey) return;
+    if (mobileCatchupTimer) {
+        clearTimeout(mobileCatchupTimer);
+    }
+    mobileCatchupTimer = setTimeout(() => {
+        mobileCatchupTimer = null;
+        console.log('Running mobile catch-up:', reason);
+        try {
+            if (messageSubscription) {
+                messageSubscription.close();
+            }
+        } catch (e) {
+            console.warn('Closing message subscription during catch-up failed:', e);
+        }
+        messageSubscription = null;
+        subscribeToMessages();
+        void fetchHistoricalGiftWraps();
+    }, 350);
 }
 
 /** @param {{ suppressUi?: boolean }} [options] — suppressUi: batch historical load (single UI refresh at end). */
@@ -3101,5 +3131,14 @@ document.addEventListener('DOMContentLoaded', function() {
     initNewChatUi();
     initSettingsUi();
     initImageLightbox();
+
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+            scheduleMobileCatchup('visibility-resume');
+        }
+    });
+    window.addEventListener('online', () => {
+        scheduleMobileCatchup('network-online');
+    });
 });
 
