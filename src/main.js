@@ -43,6 +43,17 @@ const activeMessageBlobUrls = new Set();
 const CONVERSATION_REPAIR_LOOKBACK_SECS = 14 * 24 * 60 * 60;
 const CONVERSATION_REPAIR_LIMIT = 1200;
 const CONVERSATION_REPAIR_COOLDOWN_MS = 15000;
+/** Paginated repair: one REQ often caps below total backlog (mobile + multi-relay). */
+const REPAIR_MAX_PAGES_DEFAULT = 8;
+const REPAIR_MAX_PAGES_DEEP = 14;
+const REPAIR_PAGE_LIMIT_DEEP = 1500;
+const INCREMENTAL_INBOX_INTERVAL_MS = 45_000;
+const INCREMENTAL_INBOX_OVERLAP_SECS = 5 * 60;
+const INCREMENTAL_INBOX_PAGE_LIMIT = 400;
+const INCREMENTAL_INBOX_MAX_PAGES = 2;
+const GAP_FILL_DEBOUNCE_MS = 450;
+const GAP_FILL_COOLDOWN_MS = 8000;
+const GAP_FILL_MAX_PAGES = 5;
 
 let conversationsListUpdateQueued = false;
 function queueConversationsListUpdate() {
@@ -96,7 +107,13 @@ let wineSearchDebounceTimer = null;
 let wineSearchSerial = 0;
 let lastNostrWineRequestMs = 0;
 const conversationRepairLastRunMs = new Map();
-let conversationRepairInFlight = false;
+/** Per-thread repair so opening chat B is not blocked by chat A. */
+const conversationRepairRunning = new Set();
+let lastInboxGiftWrapProcessedSec = 0;
+let incrementalInboxTimerId = null;
+let incrementalInboxInFlight = false;
+const gapFillDebounceByConv = new Map();
+const gapFillLastRunMs = new Map();
 let isInboxLoading = false;
 let settingsRelayDraft = [];
 let customReactionEmojiSet = [];
@@ -1299,12 +1316,18 @@ async function connectWithExtension() {
             messageSubscription = null;
         }
         if (pool) {
+            stopIncrementalInboxSync();
+            gapFillDebounceByConv.forEach((t) => clearTimeout(t));
+            gapFillDebounceByConv.clear();
+            gapFillLastRunMs.clear();
+            conversationRepairRunning.clear();
             try {
                 pool.destroy();
             } catch (e) {
                 console.warn('Destroying previous relay pool:', e);
             }
         }
+        lastInboxGiftWrapProcessedSec = 0;
         pool = new SimplePool();
         
         // Bootstrap against defaults so we can discover our kind 10050 relay list.
@@ -1346,6 +1369,7 @@ async function connectWithExtension() {
         // Live subscription first so new mail arrives while history is still decrypting.
         // History uses paginated querySync (relay result caps) + batched UI updates for mobile perf.
         subscribeToMessages();
+        startIncrementalInboxSync();
         void fetchHistoricalGiftWraps().finally(() => {
             setInboxLoading(false);
         });
@@ -1450,6 +1474,168 @@ function getReadRelayUrls() {
     return [...new Set([...(dmRelayUrls || []), ...RELAY_URLS])];
 }
 
+function noteInboxGiftWrapProcessed(createdAt) {
+    const t = typeof createdAt === 'number' && createdAt > 0 ? createdAt : 0;
+    if (t > lastInboxGiftWrapProcessedSec) {
+        lastInboxGiftWrapProcessedSec = t;
+    }
+}
+
+/**
+ * Page kind-1059 inbox queries backward in time (until cursor) so we are not limited to one relay page.
+ * @param {string[]} readRelays
+ * @param {(until?: number) => object} buildFilter — return filter without `limit`
+ * @param {{ pageLimit: number, maxPages: number, maxWaitBase: number, suppressUi?: boolean }} opts
+ */
+async function ingestPagedGiftWraps(readRelays, buildFilter, opts) {
+    const { pageLimit, maxPages, maxWaitBase, suppressUi = true } = opts;
+    let until;
+    for (let page = 0; page < maxPages; page++) {
+        const filter = buildFilter(until);
+        filter.limit = pageLimit;
+        const maxWait = Math.min(65000, maxWaitBase + readRelays.length * 3500);
+        const events = await pool.querySync(readRelays, filter, { maxWait });
+        if (!events?.length) {
+            break;
+        }
+        events.sort((a, b) => a.created_at - b.created_at);
+        for (const ev of events) {
+            try {
+                await handleGiftWrappedMessage(ev, { suppressUi });
+            } catch (err) {
+                console.warn('ingestPagedGiftWraps: handle error:', err);
+            }
+        }
+        if (events.length < pageLimit) {
+            break;
+        }
+        until = events[0].created_at - 1;
+    }
+}
+
+function stopIncrementalInboxSync() {
+    if (incrementalInboxTimerId) {
+        clearInterval(incrementalInboxTimerId);
+        incrementalInboxTimerId = null;
+    }
+}
+
+function startIncrementalInboxSync() {
+    stopIncrementalInboxSync();
+    incrementalInboxTimerId = setInterval(() => {
+        void runIncrementalInboxSync();
+    }, INCREMENTAL_INBOX_INTERVAL_MS);
+}
+
+async function runIncrementalInboxSync() {
+    if (!pool || !publicKey || incrementalInboxInFlight) {
+        return;
+    }
+    incrementalInboxInFlight = true;
+    try {
+        const readRelays = getReadRelayUrls();
+        const nowSec = Math.floor(Date.now() / 1000);
+        const baseline = lastInboxGiftWrapProcessedSec > 0 ? lastInboxGiftWrapProcessedSec : nowSec - 24 * 60 * 60;
+        const since = Math.max(0, baseline - INCREMENTAL_INBOX_OVERLAP_SECS);
+        await ingestPagedGiftWraps(
+            readRelays,
+            (until) => {
+                const f = { kinds: [1059], '#p': [publicKey], since };
+                if (until !== undefined) {
+                    f.until = until;
+                }
+                return f;
+            },
+            {
+                pageLimit: INCREMENTAL_INBOX_PAGE_LIMIT,
+                maxPages: INCREMENTAL_INBOX_MAX_PAGES,
+                maxWaitBase: 9000,
+                suppressUi: true
+            }
+        );
+        updateConversationsList();
+        if (currentChat) {
+            queueActiveChatRender(currentChat, { header: true });
+        }
+    } catch (err) {
+        console.warn('Incremental inbox sync failed:', err);
+    } finally {
+        incrementalInboxInFlight = false;
+    }
+}
+
+function conversationHasPendingReactions(conversationPubkey) {
+    const pk = normalizePubkey(conversationPubkey);
+    for (const [, list] of pendingReactionsByMessageId) {
+        if (!Array.isArray(list)) {
+            continue;
+        }
+        if (list.some((p) => p && normalizePubkey(p.conversationPubkey) === pk)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function scheduleGapFillForConversation(conversationPubkey) {
+    const pk = normalizePubkey(conversationPubkey);
+    const prev = gapFillDebounceByConv.get(pk);
+    if (prev) {
+        clearTimeout(prev);
+    }
+    gapFillDebounceByConv.set(
+        pk,
+        setTimeout(() => {
+            gapFillDebounceByConv.delete(pk);
+            void runGapFillForConversation(pk);
+        }, GAP_FILL_DEBOUNCE_MS)
+    );
+}
+
+async function runGapFillForConversation(conversationPubkey) {
+    if (!pool || !publicKey || !conversationPubkey) {
+        return;
+    }
+    const pk = normalizePubkey(conversationPubkey);
+    if (!conversationHasPendingReactions(pk)) {
+        return;
+    }
+    const now = Date.now();
+    if (now - (gapFillLastRunMs.get(pk) || 0) < GAP_FILL_COOLDOWN_MS) {
+        return;
+    }
+    gapFillLastRunMs.set(pk, now);
+
+    const readRelays = getReadRelayUrls();
+    const since = Math.floor(Date.now() / 1000) - CONVERSATION_REPAIR_LOOKBACK_SECS;
+    try {
+        await ingestPagedGiftWraps(
+            readRelays,
+            (until) => {
+                const f = { kinds: [1059], '#p': [publicKey], since };
+                if (until !== undefined) {
+                    f.until = until;
+                }
+                return f;
+            },
+            {
+                pageLimit: CONVERSATION_REPAIR_LIMIT,
+                maxPages: GAP_FILL_MAX_PAGES,
+                maxWaitBase: 14000,
+                suppressUi: true
+            }
+        );
+    } catch (err) {
+        console.warn('Gap-fill gift wrap ingest failed:', err);
+    }
+
+    updateConversationsList();
+    if (currentChat === pk) {
+        displayMessages(pk);
+        updateChatHeader(pk);
+    }
+}
+
 /** Connects the pool to the exact relay set and returns statuses. */
 async function connectRelaySet(relays) {
     const statuses = await Promise.all(
@@ -1550,53 +1736,53 @@ async function fetchHistoricalGiftWraps() {
     prefetchMissingConversationProfiles();
 }
 
-/** Lightweight repair fetch when opening a thread to catch relay-lagged/missed events. */
-async function fetchConversationRepair(conversationPubkey) {
-    if (!pool || !publicKey || !conversationPubkey || conversationRepairInFlight) {
+/**
+ * Repair fetch when opening a thread: paginated kind-1059 backfill so we are not limited to one relay response page.
+ * @param {{ deep?: boolean }} [options] — deep: more pages / larger page size (from openChat on mobile-heavy paths)
+ */
+async function fetchConversationRepair(conversationPubkey, options = {}) {
+    if (!pool || !publicKey || !conversationPubkey) {
+        return;
+    }
+    const pk = normalizePubkey(conversationPubkey);
+    if (conversationRepairRunning.has(pk)) {
         return;
     }
 
     const now = Date.now();
-    const last = conversationRepairLastRunMs.get(conversationPubkey) || 0;
+    const last = conversationRepairLastRunMs.get(pk) || 0;
     if (now - last < CONVERSATION_REPAIR_COOLDOWN_MS) {
         return;
     }
-    conversationRepairLastRunMs.set(conversationPubkey, now);
-    conversationRepairInFlight = true;
+    conversationRepairLastRunMs.set(pk, now);
+    conversationRepairRunning.add(pk);
 
     try {
         const readRelays = getReadRelayUrls();
         const since = Math.floor(Date.now() / 1000) - CONVERSATION_REPAIR_LOOKBACK_SECS;
-        const filter = {
-            kinds: [1059],
-            '#p': [publicKey],
-            since,
-            limit: CONVERSATION_REPAIR_LIMIT
-        };
-        const maxWait = Math.min(30000, 12000 + readRelays.length * 3500);
-        const events = await pool.querySync(readRelays, filter, { maxWait });
-        if (!events.length) {
-            return;
-        }
-
-        events.sort((a, b) => a.created_at - b.created_at);
-        for (const ev of events) {
-            try {
-                await handleGiftWrappedMessage(ev, { suppressUi: true });
-            } catch (err) {
-                console.warn('Conversation repair failed on event:', err);
-            }
-        }
+        const pageLimit = options.deep ? REPAIR_PAGE_LIMIT_DEEP : CONVERSATION_REPAIR_LIMIT;
+        const maxPages = options.deep ? REPAIR_MAX_PAGES_DEEP : REPAIR_MAX_PAGES_DEFAULT;
+        await ingestPagedGiftWraps(
+            readRelays,
+            (until) => {
+                const f = { kinds: [1059], '#p': [publicKey], since };
+                if (until !== undefined) {
+                    f.until = until;
+                }
+                return f;
+            },
+            { pageLimit, maxPages, maxWaitBase: 12000, suppressUi: true }
+        );
     } catch (err) {
         console.warn('Conversation repair query failed:', err);
     } finally {
-        conversationRepairInFlight = false;
+        conversationRepairRunning.delete(pk);
     }
 
     updateConversationsList();
-    if (currentChat === conversationPubkey) {
-        displayMessages(conversationPubkey);
-        updateChatHeader(conversationPubkey);
+    if (currentChat === pk) {
+        displayMessages(pk);
+        updateChatHeader(pk);
     }
 }
 
@@ -2042,6 +2228,7 @@ function handleReactionRumor(rumor, conversationPubkey, authorPubkey) {
         const pending = pendingReactionsByMessageId.get(targetMessageId) || [];
         pending.push({ conversationPubkey, emoji, fromPubkey: authorPubkey });
         pendingReactionsByMessageId.set(targetMessageId, pending);
+        scheduleGapFillForConversation(conversationPubkey);
     }
     return true;
 }
@@ -2199,96 +2386,103 @@ async function handleGiftWrappedMessage(giftWrap, options = {}) {
         
         const rumor = JSON.parse(rumorJSON);
         console.log('Unwrapped rumor:', { kind: rumor.kind, pubkey: rumor.pubkey, content: rumor.content?.substring(0, 50) });
-        
-        // Step 4: NIP-17 — kind 14 DMs, kind 7 reactions, kind 15 file messages (see nips/17.md).
-        if (rumor.kind !== 14 && rumor.kind !== 7 && rumor.kind !== 15) {
-            console.warn('Unsupported rumor kind inside gift wrap (skipping):', rumor.kind);
-            return;
-        }
 
-        // Step 5: Verify the sender
-        if (normalizePubkey(seal.pubkey) !== normalizePubkey(rumor.pubkey)) {
-            console.error('Sender pubkey mismatch - potential impersonation attempt');
-            return;
-        }
-
-        const authorPubkey = normalizePubkey(rumor.pubkey);
-        const conversationPubkey = getRumorConversationPubkey(rumor, authorPubkey);
-        if (!conversationPubkey) {
-            console.error('Outgoing rumor missing p tag; cannot assign conversation');
-            return;
-        }
-
-        if (!conversations[conversationPubkey]) {
-            conversations[conversationPubkey] = [];
-        }
-
-        if (rumor.id) {
-            if (seenRumorIds.has(rumor.id)) {
+        try {
+            // Step 4: NIP-17 — kind 14 DMs, kind 7 reactions, kind 15 file messages (see nips/17.md).
+            if (rumor.kind !== 14 && rumor.kind !== 7 && rumor.kind !== 15) {
+                console.warn('Unsupported rumor kind inside gift wrap (skipping):', rumor.kind);
                 return;
             }
-            seenRumorIds.add(rumor.id);
-        }
 
-        if (rumor.kind === 7) {
-            const applied = handleReactionRumor(rumor, conversationPubkey, authorPubkey);
-            if (!applied) {
+            // Step 5: Verify the sender
+            if (normalizePubkey(seal.pubkey) !== normalizePubkey(rumor.pubkey)) {
+                console.error('Sender pubkey mismatch - potential impersonation attempt');
                 return;
             }
-            if (!options.suppressUi) {
-                if (currentChat === conversationPubkey) {
-                    queueActiveChatRender(conversationPubkey);
+
+            const authorPubkey = normalizePubkey(rumor.pubkey);
+            const conversationPubkey = getRumorConversationPubkey(rumor, authorPubkey);
+            if (!conversationPubkey) {
+                console.error('Outgoing rumor missing p tag; cannot assign conversation');
+                return;
+            }
+
+            if (!conversations[conversationPubkey]) {
+                conversations[conversationPubkey] = [];
+            }
+
+            if (rumor.id) {
+                if (seenRumorIds.has(rumor.id)) {
+                    return;
                 }
-                updateConversationsList();
+                seenRumorIds.add(rumor.id);
             }
-            return;
-        }
 
-        // Same logical message can appear locally first, then again from our self-addressed gift wrap
-        if (rumor.id && conversations[conversationPubkey].some((m) => m.id === rumor.id)) {
-            return;
-        }
-
-        if (rumor.kind === 15) {
-            const fileMeta = parseKind15FileMeta(rumor);
-            if (!fileMeta) {
-                console.warn('Kind 15 rumor missing file URL; skipping', { id: rumor.id });
+            if (rumor.kind === 7) {
+                const applied = handleReactionRumor(rumor, conversationPubkey, authorPubkey);
+                if (!applied) {
+                    return;
+                }
+                if (!options.suppressUi) {
+                    if (currentChat === conversationPubkey) {
+                        queueActiveChatRender(conversationPubkey);
+                    }
+                    updateConversationsList();
+                }
                 return;
             }
-            conversations[conversationPubkey].push({
-                id: rumor.id,
-                kind: 15,
-                content: rumor.content,
-                fileMeta,
-                timestamp: rumor.created_at,
-                from: authorPubkey,
-                actualTimestamp: giftWrap.created_at
-            });
-        } else {
-            conversations[conversationPubkey].push({
-                id: rumor.id,
-                kind: 14,
-                content: rumor.content,
-                timestamp: rumor.created_at,
-                from: authorPubkey,
-                actualTimestamp: giftWrap.created_at
-            });
-        }
-        applyPendingReactionsForMessage(conversationPubkey, conversations[conversationPubkey][conversations[conversationPubkey].length - 1]);
 
-        conversations[conversationPubkey].sort((a, b) => a.timestamp - b.timestamp);
-
-        if (!options.suppressUi) {
-            updateConversationsList();
-            if (currentChat === conversationPubkey) {
-                queueActiveChatRender(conversationPubkey, { header: true });
+            // Same logical message can appear locally first, then again from our self-addressed gift wrap
+            if (rumor.id && conversations[conversationPubkey].some((m) => m.id === rumor.id)) {
+                return;
             }
-            if (!userProfiles[conversationPubkey]) {
-                void fetchUserProfile(conversationPubkey).then(() => {
-                    queueConversationsListUpdate();
-                    queueChatHeaderUpdate(conversationPubkey);
+
+            if (rumor.kind === 15) {
+                const fileMeta = parseKind15FileMeta(rumor);
+                if (!fileMeta) {
+                    console.warn('Kind 15 rumor missing file URL; skipping', { id: rumor.id });
+                    return;
+                }
+                conversations[conversationPubkey].push({
+                    id: rumor.id,
+                    kind: 15,
+                    content: rumor.content,
+                    fileMeta,
+                    timestamp: rumor.created_at,
+                    from: authorPubkey,
+                    actualTimestamp: giftWrap.created_at
+                });
+            } else {
+                conversations[conversationPubkey].push({
+                    id: rumor.id,
+                    kind: 14,
+                    content: rumor.content,
+                    timestamp: rumor.created_at,
+                    from: authorPubkey,
+                    actualTimestamp: giftWrap.created_at
                 });
             }
+            applyPendingReactionsForMessage(
+                conversationPubkey,
+                conversations[conversationPubkey][conversations[conversationPubkey].length - 1]
+            );
+
+            conversations[conversationPubkey].sort((a, b) => a.timestamp - b.timestamp);
+
+            if (!options.suppressUi) {
+                updateConversationsList();
+                if (currentChat === conversationPubkey) {
+                    queueActiveChatRender(conversationPubkey, { header: true });
+                }
+                if (!userProfiles[conversationPubkey]) {
+                    void fetchUserProfile(conversationPubkey).then(() => {
+                        queueConversationsListUpdate();
+                        queueChatHeaderUpdate(conversationPubkey);
+                    });
+                }
+            }
+        } finally {
+            noteInboxGiftWrapProcessed(giftWrap.created_at);
         }
 
     } catch (error) {
@@ -2487,7 +2681,7 @@ function openChat(pubkey) {
     updateChatHeader(pubkey);
     displayMessages(pubkey);
     updateConversationsList();
-    void fetchConversationRepair(currentChat);
+    void fetchConversationRepair(currentChat, { deep: true });
 }
 
 function backToConversations() {
