@@ -14,6 +14,9 @@
     <div class="container">
         <div class="sidebar">
             <div class="sidebar-header">
+                <button type="button" class="sidebar-settings-btn" id="sidebarSettingsBtn" aria-label="Open settings" hidden>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.14,12.94a7.49,7.49,0,0,0,.05-.94,7.49,7.49,0,0,0-.05-.94l2.11-1.65a.48.48,0,0,0,.12-.61l-2-3.46a.5.5,0,0,0-.6-.22l-2.49,1a7.28,7.28,0,0,0-1.63-.94l-.38-2.65A.49.49,0,0,0,13.79,2H10.21a.49.49,0,0,0-.49.42L9.34,5.07a7.28,7.28,0,0,0-1.63.94l-2.49-1a.5.5,0,0,0-.6.22l-2,3.46a.48.48,0,0,0,.12.61L4.86,11.06a7.49,7.49,0,0,0-.05.94,7.49,7.49,0,0,0,.05.94L2.75,14.59a.48.48,0,0,0-.12.61l2,3.46a.5.5,0,0,0,.6.22l2.49-1a7.28,7.28,0,0,0,1.63.94l.38,2.65a.49.49,0,0,0,.49.42h3.58a.49.49,0,0,0,.49-.42l.38-2.65a7.28,7.28,0,0,0,1.63-.94l2.49,1a.5.5,0,0,0,.6-.22l2-3.46a.48.48,0,0,0-.12-.61ZM12,15.5A3.5,3.5,0,1,1,15.5,12,3.5,3.5,0,0,1,12,15.5Z"/></svg>
+                </button>
                 <h1 class="app-title">
                     <span class="app-name">bullishChat</span>
                     <span class="app-version" id="appVersion" aria-label="App version"></span>
@@ -133,6 +136,54 @@
             <div class="new-chat-suggestions" id="newChatSuggestions" role="listbox" aria-label="Search results" hidden></div>
             <p class="modal-footnote" id="newChatSearchStatus" aria-live="polite"></p>
         </div>
+    </div>
+
+    <div id="settingsModal" class="modal-backdrop" hidden>
+        <div class="modal modal--settings" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle" tabindex="-1">
+            <div class="modal-header">
+                <h2 id="settingsModalTitle" class="modal-title">Settings</h2>
+                <button type="button" class="modal-close" id="settingsModalClose" aria-label="Close">×</button>
+            </div>
+            <div class="settings-scroll">
+            <div class="settings-section">
+                <div class="settings-section-title">DM Inbox Relays (kind 10050)</div>
+                <p class="settings-section-note">These are the relays others should use to deliver your private messages.</p>
+                <div class="settings-relay-row">
+                    <input type="url" class="modal-search settings-relay-input" id="settingsRelayInput" value="wss://" placeholder="wss://inbox.example.com" autocomplete="off" spellcheck="false" />
+                    <button type="button" class="settings-add-btn" id="settingsRelayAddBtn">Add</button>
+                </div>
+                <div class="settings-relay-list" id="settingsRelayList"></div>
+                <p class="modal-footnote" id="settingsRelayStatus" aria-live="polite"></p>
+                <div class="settings-actions">
+                    <button type="button" class="btn settings-save-btn" id="settingsSaveBtn">Save relays</button>
+                </div>
+            </div>
+            <div class="settings-section settings-section--emoji">
+                <div class="settings-section-title">Reaction Emoji Set</div>
+                <p class="settings-section-note">Current set preview (quick picker uses first 5). Import from discovery, then save.</p>
+                <div class="settings-emoji-preview" id="settingsEmojiPreview"></div>
+                <p class="modal-footnote" id="settingsEmojiStatus" aria-live="polite"></p>
+                <div class="settings-actions settings-actions--split settings-emoji-actions">
+                    <button type="button" class="settings-add-btn settings-emoji-reset-btn" id="settingsEmojiResetBtn">Reset default</button>
+                    <button type="button" class="btn settings-save-btn settings-emoji-save-btn" id="settingsEmojiSaveBtn">Save emoji set</button>
+                </div>
+            </div>
+            <div class="settings-section settings-section--emoji-discover">
+                <div class="settings-section-title">Discover Emoji Sets</div>
+                <p class="settings-section-note">Browse public sets from connected relays and import one into your editor.</p>
+                <div class="settings-actions">
+                    <button type="button" class="settings-add-btn" id="settingsEmojiDiscoverBtn">Refresh</button>
+                </div>
+                <div class="settings-relay-list settings-emoji-discover-list" id="settingsEmojiDiscoverList"></div>
+                <p class="modal-footnote" id="settingsEmojiDiscoverStatus" aria-live="polite"></p>
+            </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="imageLightbox" class="image-lightbox" hidden>
+        <button type="button" class="image-lightbox-close" id="imageLightboxClose" aria-label="Close image">×</button>
+        <img class="image-lightbox-img" id="imageLightboxImg" alt="">
     </div>
 
     <script type="module" src="/src/main.js"></script>

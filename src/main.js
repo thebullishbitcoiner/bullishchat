@@ -31,8 +31,10 @@ const conversationItemEls = new Map();
 const seenRumorIds = new Set();
 /** Reactions that arrive before their target message. */
 const pendingReactionsByMessageId = new Map();
-const QUICK_REACTIONS = ['🤙', '💜', '👍', '😂', '🚀'];
-const EXTRA_REACTIONS = ['🔥', '👏', '🙏', '🎉', '👀', '💯', '🤯', '🥲', '😎', '🤔'];
+const DEFAULT_QUICK_REACTIONS = ['🤙', '💜', '👍', '😂', '🚀'];
+const DEFAULT_EXTRA_REACTIONS = ['🔥', '👏', '🙏', '🎉', '👀', '💯', '🤯', '🥲', '😎', '🤔'];
+const CUSTOM_REACTION_SET_KIND = 30030;
+const CUSTOM_REACTION_SET_D_TAG = 'bullishchat-reaction-set';
 const LIGHTNING_INVOICE_RE = /(lightning:)?(ln(?:bc|tb|bcrt|sb)[0-9a-z]+)/i;
 /** Detect bare http(s) URLs in message text for links / inline images (DOM-built, no HTML injection). */
 const HTTP_URL_IN_TEXT_RE = /\bhttps?:\/\/[^\s<>"'`]+/gi;
@@ -64,6 +66,28 @@ function queueChatHeaderUpdate(pubkey) {
     });
 }
 
+let activeChatRenderTimer = null;
+let activeChatRenderPubkey = null;
+let activeChatRenderNeedsHeader = false;
+function queueActiveChatRender(pubkey, opts = {}) {
+    if (currentChat !== pubkey) return;
+    activeChatRenderPubkey = pubkey;
+    activeChatRenderNeedsHeader = activeChatRenderNeedsHeader || Boolean(opts.header);
+    if (activeChatRenderTimer) return;
+    activeChatRenderTimer = setTimeout(() => {
+        const target = activeChatRenderPubkey;
+        const shouldHeader = activeChatRenderNeedsHeader;
+        activeChatRenderTimer = null;
+        activeChatRenderPubkey = null;
+        activeChatRenderNeedsHeader = false;
+        if (!target || currentChat !== target) return;
+        displayMessages(target);
+        if (shouldHeader) {
+            updateChatHeader(target);
+        }
+    }, 90);
+}
+
 /** nostr.wine search (kind 0); free tier ~1 req/s */
 const NOSTR_WINE_SEARCH_URL = 'https://api.nostr.wine/search';
 
@@ -74,6 +98,307 @@ let lastNostrWineRequestMs = 0;
 const conversationRepairLastRunMs = new Map();
 let conversationRepairInFlight = false;
 let isInboxLoading = false;
+let settingsRelayDraft = [];
+let customReactionEmojiSet = [];
+let customReactionEmojiUrlMap = {};
+let discoveredEmojiSets = [];
+let settingsEmojiDraftSet = [];
+
+function splitGraphemes(str) {
+    if (!str) return [];
+    if (typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function') {
+        const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+        return [...seg.segment(str)].map((s) => s.segment);
+    }
+    return Array.from(str);
+}
+
+function getReactionSet() {
+    const list = customReactionEmojiSet.length
+        ? customReactionEmojiSet
+        : [...DEFAULT_QUICK_REACTIONS, ...DEFAULT_EXTRA_REACTIONS];
+    return {
+        quick: list.slice(0, 5),
+        extra: list.slice(5)
+    };
+}
+
+function emojiShortcodeFromToken(token) {
+    if (typeof token !== 'string') return '';
+    const m = token.trim().match(/^:([a-zA-Z0-9_+-]+):$/);
+    return m ? m[1] : '';
+}
+
+function normalizeCustomEmojiLines(raw) {
+    const source = typeof raw === 'string' ? raw : '';
+    const lines = source
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean);
+    const out = [];
+    const seen = new Set();
+    for (const line of lines) {
+        const emoji = splitGraphemes(line).join('').trim();
+        if (!emoji) continue;
+        if (seen.has(emoji)) continue;
+        seen.add(emoji);
+        out.push(emoji);
+    }
+    return out.slice(0, 64);
+}
+
+function parseCustomReactionSetEvent(ev) {
+    if (!ev) return [];
+    if (Array.isArray(ev.tags)) {
+        const tagShortcodes = ev.tags
+            .filter((t) => t[0] === 'emoji' && typeof t[1] === 'string' && t[1].trim().length)
+            .map((t) => `:${t[1].trim()}:`);
+        if (tagShortcodes.length) {
+            return normalizeCustomEmojiLines(tagShortcodes.join('\n'));
+        }
+    }
+    try {
+        const parsed = JSON.parse(ev.content || '{}');
+        if (Array.isArray(parsed?.emojis)) {
+            return normalizeCustomEmojiLines(parsed.emojis.join('\n'));
+        }
+    } catch {
+        // fallback below
+    }
+    return normalizeCustomEmojiLines(ev?.content || '');
+}
+
+function parseCustomReactionSetMeta(ev) {
+    if (!ev) return { emojis: [], urlMap: {} };
+    const urlMap = {};
+    if (Array.isArray(ev.tags)) {
+        for (const t of ev.tags) {
+            if (t[0] !== 'emoji') continue;
+            const shortcode = typeof t[1] === 'string' ? t[1].trim() : '';
+            const url = typeof t[2] === 'string' ? t[2].trim() : '';
+            if (!shortcode || !url) continue;
+            urlMap[shortcode] = url;
+        }
+        const tagShortcodes = Object.keys(urlMap).map((s) => `:${s}:`);
+        if (tagShortcodes.length) {
+            return {
+                emojis: normalizeCustomEmojiLines(tagShortcodes.join('\n')),
+                urlMap
+            };
+        }
+    }
+    return {
+        emojis: parseCustomReactionSetEvent(ev),
+        urlMap: {}
+    };
+}
+
+function getTagValue(tags, key) {
+    if (!Array.isArray(tags)) return '';
+    const row = tags.find((t) => t[0] === key && typeof t[1] === 'string' && t[1].length);
+    return row ? row[1] : '';
+}
+
+function shortAuthor(pubkey) {
+    try {
+        const npub = nip19.npubEncode(pubkey);
+        return `${npub.slice(0, 10)}…${npub.slice(-6)}`;
+    } catch {
+        return `${pubkey.slice(0, 8)}…${pubkey.slice(-6)}`;
+    }
+}
+
+function renderDiscoveredEmojiSets() {
+    const list = document.getElementById('settingsEmojiDiscoverList');
+    if (!list) return;
+    list.innerHTML = '';
+    if (!discoveredEmojiSets.length) {
+        list.innerHTML = '<div class="new-chat-suggestion-empty" role="status">No emoji sets found on connected relays.</div>';
+        return;
+    }
+    for (const set of discoveredEmojiSets) {
+        const row = document.createElement('div');
+        row.className = 'settings-emoji-set-item';
+
+        const main = document.createElement('div');
+        main.className = 'settings-emoji-set-main';
+        const name = document.createElement('div');
+        name.className = 'settings-emoji-set-name';
+        name.textContent = set.name;
+        const meta = document.createElement('div');
+        meta.className = 'settings-emoji-set-meta';
+        const emojiLabel = set.count === 1 ? 'emoji' : 'emojis';
+        meta.textContent = `${set.count} ${emojiLabel} · by ${getDisplayName(set.pubkey)}`;
+        const preview = document.createElement('div');
+        preview.className = 'settings-emoji-set-preview';
+        const previewTokens = set.emojis.slice(0, 7);
+        for (const token of previewTokens) {
+            const shortcode = emojiShortcodeFromToken(token);
+            const url = shortcode ? (set.urlMap?.[shortcode] || '') : '';
+            if (url) {
+                const img = document.createElement('img');
+                img.src = url;
+                img.alt = token;
+                img.referrerPolicy = 'no-referrer';
+                img.loading = 'lazy';
+                preview.appendChild(img);
+            } else if (!shortcode) {
+                const span = document.createElement('span');
+                span.textContent = token;
+                preview.appendChild(span);
+            }
+        }
+        main.appendChild(name);
+        main.appendChild(meta);
+        main.appendChild(preview);
+
+        const importBtn = document.createElement('button');
+        importBtn.type = 'button';
+        importBtn.className = 'settings-add-btn';
+        importBtn.textContent = 'Import';
+        importBtn.addEventListener('click', () => {
+            const status = document.getElementById('settingsEmojiStatus');
+            customReactionEmojiUrlMap = { ...(set.urlMap || {}) };
+            settingsEmojiDraftSet = [...set.emojis];
+            renderSettingsEmojiPreview(settingsEmojiDraftSet);
+            if (status) status.textContent = `Imported "${set.name}". Save to publish it on your profile.`;
+        });
+
+        row.appendChild(main);
+        row.appendChild(importBtn);
+        list.appendChild(row);
+    }
+}
+
+async function discoverEmojiSets() {
+    const status = document.getElementById('settingsEmojiDiscoverStatus');
+    if (status) status.textContent = 'Searching…';
+    try {
+        const relays = [...new Set([...(dmRelayUrls?.length ? dmRelayUrls : []), ...RELAY_URLS])];
+        const filter = { kinds: [CUSTOM_REACTION_SET_KIND], limit: 80 };
+        console.log('[emoji-discovery] querying relays:', relays);
+        console.log('[emoji-discovery] filter:', filter);
+        const events = await pool.querySync(
+            relays,
+            filter,
+            { maxWait: 12000 }
+        );
+        console.log('[emoji-discovery] raw event count:', Array.isArray(events) ? events.length : 0);
+        const newestByKey = new Map();
+        for (const ev of events || []) {
+            const d = getTagValue(ev.tags, 'd') || 'default';
+            const key = `${ev.pubkey}:${d}`;
+            const prev = newestByKey.get(key);
+            if (!prev || (ev.created_at || 0) > (prev.created_at || 0)) {
+                newestByKey.set(key, ev);
+            }
+        }
+        console.log('[emoji-discovery] unique set keys:', newestByKey.size);
+        const parsed = [];
+        for (const ev of newestByKey.values()) {
+            const parsedSet = parseCustomReactionSetMeta(ev);
+            const emojis = parsedSet.emojis;
+            if (!emojis.length) continue;
+            const name = getTagValue(ev.tags, 'name') || getTagValue(ev.tags, 'title') || getTagValue(ev.tags, 'd') || 'Untitled set';
+            parsed.push({
+                pubkey: ev.pubkey,
+                name,
+                emojis,
+                urlMap: parsedSet.urlMap,
+                count: emojis.length,
+                createdAt: ev.created_at || 0
+            });
+        }
+        parsed.sort((a, b) => b.createdAt - a.createdAt);
+        discoveredEmojiSets = parsed.slice(0, 40);
+        if (discoveredEmojiSets.length) {
+            console.log(
+                '[emoji-discovery] top sets:',
+                discoveredEmojiSets.slice(0, 5).map((s) => ({
+                    name: s.name,
+                    author: s.pubkey,
+                    count: s.count
+                }))
+            );
+        } else {
+            console.log('[emoji-discovery] no parseable sets found from queried events');
+        }
+        renderDiscoveredEmojiSets();
+        if (status) status.textContent = discoveredEmojiSets.length ? `${discoveredEmojiSets.length} set(s) found.` : 'No sets found.';
+    } catch (e) {
+        console.error('[emoji-discovery] query failed:', e);
+        discoveredEmojiSets = [];
+        renderDiscoveredEmojiSets();
+        if (status) status.textContent = 'Could not discover emoji sets.';
+    }
+}
+
+async function loadOwnCustomReactionSetFromNostr() {
+    if (!pool || !publicKey) {
+        customReactionEmojiSet = [];
+        return;
+    }
+    try {
+        const relays = [...new Set([...(dmRelayUrls?.length ? dmRelayUrls : []), ...RELAY_URLS])];
+        const events = await pool.querySync(
+            relays,
+            {
+                kinds: [CUSTOM_REACTION_SET_KIND],
+                authors: [publicKey],
+                '#d': [CUSTOM_REACTION_SET_D_TAG],
+                limit: 5
+            },
+            { maxWait: 9000 }
+        );
+        const newest = (events || []).sort((a, b) => (b.created_at || 0) - (a.created_at || 0))[0];
+        const parsedSet = parseCustomReactionSetMeta(newest);
+        customReactionEmojiSet = parsedSet.emojis;
+        customReactionEmojiUrlMap = parsedSet.urlMap;
+    } catch (e) {
+        console.warn('Could not load custom reaction set from Nostr:', e);
+        customReactionEmojiSet = [];
+        customReactionEmojiUrlMap = {};
+    }
+}
+
+async function saveOwnCustomReactionSetToNostr(list) {
+    if (!pool || !publicKey) {
+        throw new Error('Connect first.');
+    }
+    const emojis = normalizeCustomEmojiLines((list || []).join('\n'));
+    const emojiTags = [];
+    const publishedUrlMap = {};
+    for (const token of emojis) {
+        const shortcode = emojiShortcodeFromToken(token);
+        if (!shortcode) continue;
+        const url = customReactionEmojiUrlMap[shortcode];
+        if (!url) continue;
+        emojiTags.push(['emoji', shortcode, url]);
+        publishedUrlMap[shortcode] = url;
+    }
+    if (!emojiTags.length) {
+        throw new Error('No NIP-30 emoji tag entries available to publish.');
+    }
+    const ev = {
+        kind: CUSTOM_REACTION_SET_KIND,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+            ['d', CUSTOM_REACTION_SET_D_TAG],
+            ['title', CUSTOM_REACTION_SET_D_TAG],
+            ...emojiTags
+        ],
+        content: ''
+    };
+    const signed = await window.nostr.signEvent(ev);
+    const targets = [...new Set([...(dmRelayUrls?.length ? dmRelayUrls : []), ...RELAY_URLS])];
+    const publishAttempts = targets.map(async (url) => {
+        await pool.publish([url], signed);
+        return url;
+    });
+    await Promise.any(publishAttempts);
+    customReactionEmojiSet = emojis;
+    customReactionEmojiUrlMap = publishedUrlMap;
+}
 
 function setInboxLoading(loading) {
     isInboxLoading = Boolean(loading);
@@ -221,6 +546,17 @@ function toggleFabMenu() {
     }
 }
 
+function isOverlayOpen() {
+    const modal = document.getElementById('newChatModal');
+    const settings = document.getElementById('settingsModal');
+    const lightbox = document.getElementById('imageLightbox');
+    return Boolean((modal && !modal.hidden) || (settings && !settings.hidden) || (lightbox && !lightbox.hidden));
+}
+
+function syncBodyOverlayLock() {
+    document.body.style.overflow = isOverlayOpen() ? 'hidden' : '';
+}
+
 function openNewChatModal() {
     const modal = document.getElementById('newChatModal');
     const input = document.getElementById('newChatSearch');
@@ -245,7 +581,7 @@ function openNewChatModal() {
         status.textContent =
             'Type a name, paste a full npub, or enter a 64-character hex pubkey. Name search uses nostr.wine (about 1 lookup per second).';
     }
-    document.body.style.overflow = 'hidden';
+    syncBodyOverlayLock();
     setTimeout(() => input.focus(), 50);
 }
 
@@ -254,12 +590,354 @@ function closeNewChatModal() {
     if (modal) {
         modal.hidden = true;
     }
-    document.body.style.overflow = '';
+    syncBodyOverlayLock();
     wineSearchAbort?.abort();
     if (wineSearchDebounceTimer) {
         clearTimeout(wineSearchDebounceTimer);
     }
     wineSearchSerial += 1;
+}
+
+function normalizeRelayUrl(raw) {
+    const t = (raw || '').trim();
+    if (!t) return null;
+    let u;
+    try {
+        u = new URL(t);
+    } catch {
+        return null;
+    }
+    if (u.protocol !== 'wss:') {
+        return null;
+    }
+    u.hash = '';
+    u.search = '';
+    return u.toString().replace(/\/$/, '');
+}
+
+function renderSettingsRelayList() {
+    const list = document.getElementById('settingsRelayList');
+    if (!list) return;
+    list.innerHTML = '';
+    if (!settingsRelayDraft.length) {
+        list.innerHTML = '<div class="new-chat-suggestion-empty" role="status">No DM relays configured yet.</div>';
+        return;
+    }
+    for (const relay of settingsRelayDraft) {
+        const row = document.createElement('div');
+        row.className = 'settings-relay-item';
+        const text = document.createElement('div');
+        text.className = 'settings-relay-url';
+        text.textContent = relay;
+        text.title = relay;
+        const rm = document.createElement('button');
+        rm.type = 'button';
+        rm.className = 'settings-relay-remove';
+        rm.setAttribute('aria-label', `Remove relay ${relay}`);
+        rm.textContent = '×';
+        rm.addEventListener('click', () => {
+            settingsRelayDraft = settingsRelayDraft.filter((r) => r !== relay);
+            renderSettingsRelayList();
+        });
+        row.appendChild(text);
+        row.appendChild(rm);
+        list.appendChild(row);
+    }
+}
+
+function currentEmojiEditorText() {
+    const list = customReactionEmojiSet.length
+        ? customReactionEmojiSet
+        : [...DEFAULT_QUICK_REACTIONS, ...DEFAULT_EXTRA_REACTIONS];
+    return list.join('\n');
+}
+
+function renderSettingsEmojiPreview(emojis) {
+    const host = document.getElementById('settingsEmojiPreview');
+    if (!host) return;
+    host.innerHTML = '';
+    if (!emojis.length) {
+        host.innerHTML = '<div class="new-chat-suggestion-empty" role="status">No emojis to preview.</div>';
+        return;
+    }
+    for (const token of emojis.slice(0, 64)) {
+        const item = document.createElement('div');
+        item.className = 'settings-emoji-preview-item';
+        const shortcode = emojiShortcodeFromToken(token);
+        const url = shortcode ? customReactionEmojiUrlMap[shortcode] : '';
+        if (url) {
+            const img = document.createElement('img');
+            img.src = url;
+            img.alt = token;
+            img.referrerPolicy = 'no-referrer';
+            img.loading = 'lazy';
+            item.appendChild(img);
+        } else {
+            if (shortcode) {
+                continue;
+            }
+            item.textContent = token;
+        }
+        host.appendChild(item);
+    }
+}
+
+function createReactionOptionButton(emoji, picker, msg, onBeforeSend) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'message-reaction-option';
+    const shortcode = emojiShortcodeFromToken(emoji);
+    const url = shortcode ? customReactionEmojiUrlMap[shortcode] : '';
+    if (url) {
+        const img = document.createElement('img');
+        img.src = url;
+        img.alt = emoji;
+        img.className = 'message-reaction-custom-emoji';
+        img.referrerPolicy = 'no-referrer';
+        img.loading = 'lazy';
+        b.appendChild(img);
+        b.title = emoji;
+    } else {
+        b.textContent = emoji;
+    }
+    b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        picker.hidden = true;
+        if (typeof onBeforeSend === 'function') onBeforeSend();
+        void sendReactionToMessage(msg, emoji);
+    });
+    return b;
+}
+
+async function openSettingsModal() {
+    const modal = document.getElementById('settingsModal');
+    const input = document.getElementById('settingsRelayInput');
+    const status = document.getElementById('settingsRelayStatus');
+    const emojiStatus = document.getElementById('settingsEmojiStatus');
+    const discoverStatus = document.getElementById('settingsEmojiDiscoverStatus');
+    if (!modal || !publicKey) return;
+    modal.hidden = false;
+    syncBodyOverlayLock();
+    await loadOwnCustomReactionSetFromNostr();
+    settingsRelayDraft = await fetchKind10050Relays(publicKey);
+    if (!settingsRelayDraft.length) {
+        settingsRelayDraft = [...RELAY_URLS];
+    }
+    renderSettingsRelayList();
+    if (status) {
+        status.textContent = 'Edit your DM inbox relays and save to publish kind 10050.';
+    }
+    if (input) {
+        input.value = 'wss://';
+        setTimeout(() => input.focus(), 30);
+    }
+    settingsEmojiDraftSet = customReactionEmojiSet.length
+        ? [...customReactionEmojiSet]
+        : [...DEFAULT_QUICK_REACTIONS, ...DEFAULT_EXTRA_REACTIONS];
+    renderSettingsEmojiPreview(settingsEmojiDraftSet);
+    if (emojiStatus) {
+        emojiStatus.textContent = customReactionEmojiSet.length
+            ? `Loaded ${customReactionEmojiSet.length} custom emojis from Nostr.`
+            : 'No custom set on Nostr. Using default emoji set.';
+    }
+    if (discoverStatus) {
+        discoverStatus.textContent = 'Click refresh to discover public sets.';
+    }
+    discoveredEmojiSets = [];
+    renderDiscoveredEmojiSets();
+}
+
+function closeSettingsModal() {
+    const modal = document.getElementById('settingsModal');
+    if (modal) modal.hidden = true;
+    syncBodyOverlayLock();
+}
+
+async function saveSettingsRelays() {
+    const status = document.getElementById('settingsRelayStatus');
+    const saveBtn = document.getElementById('settingsSaveBtn');
+    if (!pool || !publicKey) {
+        if (status) status.textContent = 'Connect first.';
+        return;
+    }
+    if (!settingsRelayDraft.length) {
+        if (status) status.textContent = 'Add at least one relay URL.';
+        return;
+    }
+    if (saveBtn) saveBtn.disabled = true;
+    if (status) status.textContent = 'Saving…';
+    try {
+        const ev = {
+            kind: 10050,
+            created_at: Math.floor(Date.now() / 1000),
+            tags: settingsRelayDraft.map((url) => ['relay', url]),
+            content: ''
+        };
+        const signed = await window.nostr.signEvent(ev);
+        const targets = [...new Set([...dmRelayUrls, ...RELAY_URLS, ...settingsRelayDraft])];
+        const publishAttempts = targets.map(async (url) => {
+            await pool.publish([url], signed);
+            return url;
+        });
+        await Promise.any(publishAttempts);
+        dmRelayUrls = [...new Set(settingsRelayDraft)];
+        if (status) status.textContent = `Saved ${settingsRelayDraft.length} relay(s).`;
+    } catch (err) {
+        if (status) status.textContent = 'Could not publish settings. Try again.';
+        console.error('Failed to save kind 10050 relays:', err);
+    } finally {
+        if (saveBtn) saveBtn.disabled = false;
+    }
+}
+
+function initSettingsUi() {
+    const btn = document.getElementById('sidebarSettingsBtn');
+    const modal = document.getElementById('settingsModal');
+    const close = document.getElementById('settingsModalClose');
+    const addBtn = document.getElementById('settingsRelayAddBtn');
+    const input = document.getElementById('settingsRelayInput');
+    const saveBtn = document.getElementById('settingsSaveBtn');
+    const status = document.getElementById('settingsRelayStatus');
+    const emojiSaveBtn = document.getElementById('settingsEmojiSaveBtn');
+    const emojiResetBtn = document.getElementById('settingsEmojiResetBtn');
+    const emojiStatus = document.getElementById('settingsEmojiStatus');
+    const emojiDiscoverBtn = document.getElementById('settingsEmojiDiscoverBtn');
+
+    if (btn) {
+        btn.addEventListener('click', () => {
+            void openSettingsModal();
+        });
+    }
+    if (modal) {
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) closeSettingsModal();
+        });
+    }
+    if (close) {
+        close.addEventListener('click', closeSettingsModal);
+    }
+    if (addBtn && input) {
+        addBtn.addEventListener('click', () => {
+            const normalized = normalizeRelayUrl(input.value);
+            if (!normalized) {
+                if (status) status.textContent = 'Enter a valid wss:// relay URL.';
+                return;
+            }
+            if (!settingsRelayDraft.includes(normalized)) {
+                settingsRelayDraft.push(normalized);
+                settingsRelayDraft = [...new Set(settingsRelayDraft)];
+                renderSettingsRelayList();
+                if (status) status.textContent = '';
+            }
+            input.value = 'wss://';
+            input.focus();
+        });
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                addBtn.click();
+            }
+        });
+    }
+    if (saveBtn) {
+        saveBtn.addEventListener('click', () => {
+            void saveSettingsRelays();
+        });
+    }
+    if (emojiSaveBtn) {
+        emojiSaveBtn.addEventListener('click', async () => {
+            const parsed = normalizeCustomEmojiLines(settingsEmojiDraftSet.join('\n'));
+            if (parsed.length < 5) {
+                if (emojiStatus) emojiStatus.textContent = 'Import a set with at least 5 emojis.';
+                return;
+            }
+            emojiSaveBtn.disabled = true;
+            if (emojiStatus) emojiStatus.textContent = 'Saving to Nostr…';
+            try {
+                await saveOwnCustomReactionSetToNostr(parsed);
+                if (emojiStatus) emojiStatus.textContent = `Saved ${customReactionEmojiSet.length} custom emojis to Nostr.`;
+                settingsEmojiDraftSet = [...customReactionEmojiSet];
+                renderSettingsEmojiPreview(settingsEmojiDraftSet);
+                if (currentChat) {
+                    displayMessages(currentChat);
+                }
+            } catch (e) {
+                if (emojiStatus) emojiStatus.textContent = 'Could not save emoji set to Nostr.';
+            } finally {
+                emojiSaveBtn.disabled = false;
+            }
+        });
+    }
+    if (emojiResetBtn) {
+        emojiResetBtn.addEventListener('click', async () => {
+            emojiResetBtn.disabled = true;
+            if (emojiStatus) emojiStatus.textContent = 'Resetting on Nostr…';
+            try {
+                await saveOwnCustomReactionSetToNostr([]);
+            } catch (e) {
+                if (emojiStatus) emojiStatus.textContent = 'Could not reset emoji set on Nostr.';
+                emojiResetBtn.disabled = false;
+                return;
+            }
+            settingsEmojiDraftSet = [...DEFAULT_QUICK_REACTIONS, ...DEFAULT_EXTRA_REACTIONS];
+            renderSettingsEmojiPreview(settingsEmojiDraftSet);
+            if (emojiStatus) emojiStatus.textContent = 'Reset to default emoji set (saved on Nostr).';
+            if (currentChat) {
+                displayMessages(currentChat);
+            }
+            emojiResetBtn.disabled = false;
+        });
+    }
+    if (emojiDiscoverBtn) {
+        emojiDiscoverBtn.addEventListener('click', () => {
+            void discoverEmojiSets();
+        });
+    }
+}
+
+function openImageLightbox(src) {
+    if (!src) return;
+    const lightbox = document.getElementById('imageLightbox');
+    const img = document.getElementById('imageLightboxImg');
+    if (!lightbox || !img) return;
+    img.src = src;
+    lightbox.hidden = false;
+    syncBodyOverlayLock();
+}
+
+function closeImageLightbox() {
+    const lightbox = document.getElementById('imageLightbox');
+    const img = document.getElementById('imageLightboxImg');
+    if (!lightbox || !img) return;
+    lightbox.hidden = true;
+    img.removeAttribute('src');
+    syncBodyOverlayLock();
+}
+
+function initImageLightbox() {
+    const lightbox = document.getElementById('imageLightbox');
+    const closeBtn = document.getElementById('imageLightboxClose');
+    if (!lightbox) return;
+
+    if (closeBtn) {
+        closeBtn.addEventListener('click', closeImageLightbox);
+    }
+
+    lightbox.addEventListener('click', (e) => {
+        if (e.target === lightbox) {
+            closeImageLightbox();
+        }
+    });
+
+    document.addEventListener('click', (e) => {
+        const target = e.target;
+        if (!(target instanceof HTMLElement)) return;
+        const img = target.closest('.message-inline-image');
+        if (!(img instanceof HTMLImageElement)) return;
+        if (!img.src) return;
+        e.preventDefault();
+        openImageLightbox(img.src);
+    });
 }
 
 function scheduleNewChatSearch(raw) {
@@ -484,9 +1162,21 @@ function initNewChatUi() {
         if (e.key !== 'Escape') {
             return;
         }
+        const lightbox = document.getElementById('imageLightbox');
+        if (lightbox && !lightbox.hidden) {
+            closeImageLightbox();
+            e.preventDefault();
+            return;
+        }
         const modalEl = document.getElementById('newChatModal');
         if (modalEl && !modalEl.hidden) {
             closeNewChatModal();
+            e.preventDefault();
+            return;
+        }
+        const settingsEl = document.getElementById('settingsModal');
+        if (settingsEl && !settingsEl.hidden) {
+            closeSettingsModal();
             e.preventDefault();
             return;
         }
@@ -616,39 +1306,41 @@ async function connectWithExtension() {
         }
         pool = new SimplePool();
         
-        // Connect to all relays
+        // Bootstrap against defaults so we can discover our kind 10050 relay list.
         document.getElementById('statusText').textContent = 'Connecting to relays...';
-        const connectPromises = RELAY_URLS.map(async (url) => {
-            try {
-                const relay = await pool.ensureRelay(url);
-                console.log('Connected to relay:', url);
-                return { url, success: true, relay };
-            } catch (error) {
-                console.warn('Failed to connect to relay:', url, error);
-                return { url, success: false, error };
-            }
-        });
-        
-        const results = await Promise.allSettled(connectPromises);
-        const relayResults = results
-            .filter((r) => r.status === 'fulfilled')
-            .map((r) => ({ url: r.value.url, success: r.value.success }));
+        const bootstrapResults = await connectRelaySet(RELAY_URLS);
+        const ownInboxRelays = await fetchKind10050Relays(publicKey);
+        dmRelayUrls = ownInboxRelays.length ? [...new Set(ownInboxRelays)] : [...RELAY_URLS];
+        const additionalRelayUrls = dmRelayUrls.filter((url) => !RELAY_URLS.includes(url));
+        const additionalResults = additionalRelayUrls.length ? await connectRelaySet(additionalRelayUrls) : [];
+        const relayResults = [...bootstrapResults, ...additionalResults];
         const successfulConnections = relayResults.filter((r) => r.success).length;
+        const totalConnectedTargets = [...new Set([...RELAY_URLS, ...additionalRelayUrls])].length;
+        const relayStatusByUrl = new Map(relayResults.map((r) => [r.url, r]));
+        const inboxRelayStatuses = ownInboxRelays.length
+            ? dmRelayUrls.map((url) => relayStatusByUrl.get(url) || { url, success: false })
+            : [];
 
         document.getElementById('statusDot').classList.add('connected');
-        document.getElementById('statusText').textContent = `Connected to ${successfulConnections}/${RELAY_URLS.length} relays`;
+        document.getElementById('statusText').textContent = ownInboxRelays.length
+            ? `Connected to ${successfulConnections}/${totalConnectedTargets} relays`
+            : `Connected to ${successfulConnections}/${RELAY_URLS.length} relays`;
         document.getElementById('connectionSetup').style.display = 'none';
         document.body.classList.add('is-authenticated');
         const fab = document.getElementById('sidebarFab');
         if (fab) {
             fab.removeAttribute('hidden');
         }
+        const settingsBtn = document.getElementById('sidebarSettingsBtn');
+        if (settingsBtn) {
+            settingsBtn.removeAttribute('hidden');
+        }
         const chatAreaEl = document.getElementById('chatArea');
         if (chatAreaEl) chatAreaEl.removeAttribute('hidden');
         setInboxLoading(true);
 
-        const inboxRelayStatuses = await mergeOwnInboxRelays();
-        setRelayStatusTooltip(relayResults, inboxRelayStatuses);
+        setRelayStatusTooltip(bootstrapResults, inboxRelayStatuses);
+        await loadOwnCustomReactionSetFromNostr();
 
         // Live subscription first so new mail arrives while history is still decrypting.
         // History uses paginated querySync (relay result caps) + batched UI updates for mobile perf.
@@ -730,10 +1422,20 @@ function getDisplayName(pubkey) {
 }
 
 /** Kind 10050: preferred relays to receive NIP-17 gift wraps (NIP-17 publishing + our subscription) */
-async function fetchKind10050Relays(authorPubkey) {
+async function fetchKind10050Relays(authorPubkey, options = {}) {
     try {
-        const queryRelays = dmRelayUrls?.length ? dmRelayUrls : RELAY_URLS;
-        const ev = await pool.get(queryRelays, { kinds: [10050], authors: [authorPubkey] });
+        const queryRelays = options.relays?.length
+            ? [...new Set(options.relays)]
+            : [...new Set([...(dmRelayUrls?.length ? dmRelayUrls : []), ...RELAY_URLS])];
+        if (options.ensureConnections) {
+            await connectRelaySet(queryRelays);
+        }
+        const events = await pool.querySync(
+            queryRelays,
+            { kinds: [10050], authors: [authorPubkey], limit: 8 },
+            { maxWait: options.maxWait ?? 9000 }
+        );
+        const ev = (events || []).sort((a, b) => (b.created_at || 0) - (a.created_at || 0))[0];
         if (!ev?.tags?.length) return [];
         return ev.tags.filter((t) => t[0] === 'relay' && typeof t[1] === 'string' && t[1].length > 0).map((t) => t[1]);
     } catch (e) {
@@ -742,25 +1444,20 @@ async function fetchKind10050Relays(authorPubkey) {
     }
 }
 
-/** @returns {Promise<Array<{ url: string, success: boolean }>>} */
-async function mergeOwnInboxRelays() {
-    const mine = await fetchKind10050Relays(publicKey);
-    if (!mine.length) {
-        dmRelayUrls = [...RELAY_URLS];
-        return [];
-    }
-    dmRelayUrls = [...new Set([...RELAY_URLS, ...mine])];
-    return Promise.all(
-        mine.map(async (url) => {
+/** Connects the pool to the exact relay set and returns statuses. */
+async function connectRelaySet(relays) {
+    const statuses = await Promise.all(
+        relays.map(async (url) => {
             try {
                 await pool.ensureRelay(url);
                 return { url, success: true };
             } catch (err) {
-                console.warn('Could not connect to inbox relay:', url, err);
+                console.warn('Failed to connect to relay:', url, err);
                 return { url, success: false };
             }
         })
     );
+    return statuses;
 }
 
 function setRelayStatusTooltip(defaultResults, inboxResults = []) {
@@ -1249,8 +1946,11 @@ async function loadKind15ImagePreview(previewEl, meta) {
     }
 
     if (meta.encryptionAlgorithm === 'aes-gcm' && meta.url) {
-        loading.className = 'file-message-preview-note';
-        loading.textContent = 'Could not decrypt or fetch image (CORS, key, or format).';
+        loading.remove();
+        const fallbackBubble = document.createElement('div');
+        fallbackBubble.className = 'file-message-fallback-bubble';
+        appendRichMessageContent(fallbackBubble, meta.url, { bare: true });
+        previewEl.appendChild(fallbackBubble);
         return;
     }
 
@@ -1507,7 +2207,7 @@ async function handleGiftWrappedMessage(giftWrap, options = {}) {
             }
             if (!options.suppressUi) {
                 if (currentChat === conversationPubkey) {
-                    displayMessages(conversationPubkey);
+                    queueActiveChatRender(conversationPubkey);
                 }
                 updateConversationsList();
             }
@@ -1551,8 +2251,7 @@ async function handleGiftWrappedMessage(giftWrap, options = {}) {
         if (!options.suppressUi) {
             updateConversationsList();
             if (currentChat === conversationPubkey) {
-                displayMessages(conversationPubkey);
-                updateChatHeader(conversationPubkey);
+                queueActiveChatRender(conversationPubkey, { header: true });
             }
             if (!userProfiles[conversationPubkey]) {
                 void fetchUserProfile(conversationPubkey).then(() => {
@@ -1779,7 +2478,7 @@ function updateChatHeader(pubkey) {
     }
 
     const npub = nip19.npubEncode(pubkey);
-    const npubShort = npub.length > 28 ? `${npub.slice(0, 18)}...${npub.slice(-8)}` : npub;
+    const npubShort = npub.length > 22 ? `${npub.slice(0, 11)}:${npub.slice(-11)}` : npub;
     document.getElementById('currentChatPubkey').textContent = displayName;
 
     if (npubEl) {
@@ -1901,62 +2600,34 @@ function displayMessages(pubkey) {
         const bodyEl = document.createElement('div');
         bodyEl.className = 'message-body';
         if (msg.kind === 15 && msg.fileMeta) {
-            div.classList.add('message-invoice');
-            const fileCard = document.createElement('div');
-            fileCard.className = 'file-message-card';
+            const isImage = (msg.fileMeta.fileType || '').startsWith('image/');
+            if (isImage) {
+                div.classList.add('message-invoice');
+                const previewEl = document.createElement('div');
+                previewEl.className = 'file-message-preview';
+                previewEl.hidden = false;
+                bodyEl.appendChild(previewEl);
+                void loadKind15ImagePreview(previewEl, msg.fileMeta);
+            } else {
+                div.classList.add('message-invoice');
+                const fileCard = document.createElement('div');
+                fileCard.className = 'file-message-card';
 
-            const top = document.createElement('div');
-            top.className = 'file-message-card-top';
-
-            const header = document.createElement('div');
-            header.className = 'file-message-card-header';
-            header.textContent = (msg.fileMeta.fileType || '').startsWith('image/') ? 'Image' : 'File';
-
-            const copyIconBtn = document.createElement('button');
-            copyIconBtn.type = 'button';
-            copyIconBtn.className = 'invoice-copy-icon-btn';
-            copyIconBtn.setAttribute('aria-label', 'Copy file URL');
-            copyIconBtn.textContent = '⧉';
-            copyIconBtn.addEventListener('click', async (e) => {
-                e.stopPropagation();
-                try {
-                    await navigator.clipboard.writeText(msg.fileMeta.url);
-                    copyIconBtn.textContent = '✓';
-                    setTimeout(() => {
-                        copyIconBtn.textContent = '⧉';
-                    }, 1200);
-                } catch {
-                    copyIconBtn.textContent = '!';
-                    setTimeout(() => {
-                        copyIconBtn.textContent = '⧉';
-                    }, 1200);
+                const meta = document.createElement('div');
+                meta.className = 'file-message-card-meta';
+                meta.textContent = msg.fileMeta.fileType || 'File attachment';
+                if (msg.fileMeta.dim) {
+                    meta.textContent += ` · ${msg.fileMeta.dim}`;
                 }
-            });
-            top.appendChild(header);
-            top.appendChild(copyIconBtn);
 
-            const meta = document.createElement('div');
-            meta.className = 'file-message-card-meta';
-            meta.textContent = msg.fileMeta.fileType;
-            if (msg.fileMeta.dim) {
-                meta.textContent += ` · ${msg.fileMeta.dim}`;
+                const linkRow = document.createElement('div');
+                linkRow.className = 'file-message-card-links';
+                appendRichMessageContent(linkRow, msg.fileMeta.url, { bare: true });
+
+                fileCard.appendChild(meta);
+                fileCard.appendChild(linkRow);
+                bodyEl.appendChild(fileCard);
             }
-
-            const previewEl = document.createElement('div');
-            previewEl.className = 'file-message-preview';
-            previewEl.hidden = !(msg.fileMeta.fileType || '').startsWith('image/');
-
-            const linkRow = document.createElement('div');
-            linkRow.className = 'file-message-card-links';
-            appendRichMessageContent(linkRow, msg.fileMeta.url, { bare: true });
-
-            fileCard.appendChild(top);
-            fileCard.appendChild(meta);
-            fileCard.appendChild(previewEl);
-            fileCard.appendChild(linkRow);
-            bodyEl.appendChild(fileCard);
-
-            void loadKind15ImagePreview(previewEl, msg.fileMeta);
         } else {
         const parsedInvoice = parseBolt11InvoiceFromText(msg.content);
         if (parsedInvoice) {
@@ -2054,7 +2725,7 @@ function displayMessages(pubkey) {
             reactBtn.type = 'button';
             reactBtn.className = 'message-react-btn';
             reactBtn.setAttribute('aria-label', 'React to message');
-            reactBtn.textContent = '⋯';
+            reactBtn.textContent = '⋮';
 
             const picker = document.createElement('div');
             picker.className = 'message-reaction-picker';
@@ -2064,16 +2735,9 @@ function displayMessages(pubkey) {
             const quickRow = document.createElement('div');
             quickRow.className = 'message-reaction-picker-quick';
 
-            QUICK_REACTIONS.forEach((emoji) => {
-                const b = document.createElement('button');
-                b.type = 'button';
-                b.className = 'message-reaction-option';
-                b.textContent = emoji;
-                b.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    picker.hidden = true;
-                    void sendReactionToMessage(msg, emoji);
-                });
+            const reactionSet = getReactionSet();
+            reactionSet.quick.forEach((emoji) => {
+                const b = createReactionOptionButton(emoji, picker, msg);
                 quickRow.appendChild(b);
             });
 
@@ -2089,18 +2753,11 @@ function displayMessages(pubkey) {
             expanded.className = 'message-reaction-expanded';
             expanded.hidden = true;
 
-            EXTRA_REACTIONS.forEach((emoji) => {
-                const b = document.createElement('button');
-                b.type = 'button';
-                b.className = 'message-reaction-option';
-                b.textContent = emoji;
-                b.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    picker.hidden = true;
+            reactionSet.extra.forEach((emoji) => {
+                const b = createReactionOptionButton(emoji, picker, msg, () => {
                     expanded.hidden = true;
                     picker.dataset.expanded = 'false';
                     moreBtn.hidden = false;
-                    void sendReactionToMessage(msg, emoji);
                 });
                 expanded.appendChild(b);
             });
@@ -2182,7 +2839,20 @@ function displayMessages(pubkey) {
                 .forEach(([emoji, info], index) => {
                     const pill = document.createElement('span');
                     pill.className = 'message-reaction-pill';
-                    pill.textContent = emoji;
+                    const shortcode = emojiShortcodeFromToken(emoji);
+                    const url = shortcode ? customReactionEmojiUrlMap[shortcode] : '';
+                    if (url) {
+                        const img = document.createElement('img');
+                        img.src = url;
+                        img.alt = emoji;
+                        img.className = 'message-reaction-pill-emoji';
+                        img.referrerPolicy = 'no-referrer';
+                        img.loading = 'lazy';
+                        pill.appendChild(img);
+                        pill.title = emoji;
+                    } else {
+                        pill.textContent = emoji;
+                    }
                     pill.style.setProperty('--reaction-index', String(index));
                     if (Array.isArray(info?.reactors) && info.reactors.includes(publicKey)) {
                         pill.classList.add('is-own-reaction');
@@ -2208,11 +2878,19 @@ function displayMessages(pubkey) {
 }
 
 async function publishRumorAsGiftWrap(rumor, peerPubkey) {
-    const recipientInboxRelays = await fetchKind10050Relays(peerPubkey);
-    const publishRelays =
-        recipientInboxRelays.length > 0
-            ? [...new Set([...recipientInboxRelays, ...RELAY_URLS])]
-            : [...RELAY_URLS];
+    let recipientInboxRelays = await fetchKind10050Relays(peerPubkey);
+    if (!recipientInboxRelays.length) {
+        // Retry with a wider/ensured probe before declaring recipient not NIP-17 ready.
+        recipientInboxRelays = await fetchKind10050Relays(peerPubkey, {
+            relays: [...new Set([...RELAY_URLS, ...dmRelayUrls])],
+            ensureConnections: true,
+            maxWait: 15000
+        });
+    }
+    if (!recipientInboxRelays.length) {
+        throw new Error('Recipient kind 10050 inbox relays not discoverable right now.');
+    }
+    const publishRelays = [...new Set(recipientInboxRelays)];
     const relayHint = recipientInboxRelays[0] || null;
 
     const sealContent = JSON.stringify(rumor);
@@ -2240,12 +2918,15 @@ async function publishRumorAsGiftWrap(rumor, peerPubkey) {
         throw new Error('Signing failed: missing id or sig');
     }
 
-    await createAndPublishGiftWrap(sealToWrap, peerPubkey, publishRelays, relayHint);
+    await createAndPublishGiftWrap(sealToWrap, peerPubkey, publishRelays, relayHint, { requireSuccess: true });
 
     const selfInbox = await fetchKind10050Relays(publicKey);
-    const selfPublishRelays =
-        selfInbox.length > 0 ? [...new Set([...selfInbox, ...RELAY_URLS])] : publishRelays;
-    await createAndPublishGiftWrap(sealToWrap, publicKey, selfPublishRelays, selfInbox[0] || null);
+    if (selfInbox.length > 0) {
+        const selfPublishRelays = [...new Set(selfInbox)];
+        await createAndPublishGiftWrap(sealToWrap, publicKey, selfPublishRelays, selfInbox[0] || null);
+    } else {
+        console.warn('Skipping self gift-wrap copy: no kind 10050 inbox relays for sender key.');
+    }
 }
 
 async function sendReactionToMessage(message, emoji) {
@@ -2254,7 +2935,7 @@ async function sendReactionToMessage(message, emoji) {
     if (!normalizedEmoji) return;
 
     applyReactionToMessage(message, normalizedEmoji, publicKey);
-    displayMessages(currentChat);
+    queueActiveChatRender(currentChat);
 
     try {
         const now = Math.floor(Date.now() / 1000);
@@ -2322,7 +3003,7 @@ async function sendMessage() {
     }
 }
 
-async function createAndPublishGiftWrap(seal, recipientPubkey, publishRelays, relayHint) {
+async function createAndPublishGiftWrap(seal, recipientPubkey, publishRelays, relayHint, options = {}) {
     // Generate random ephemeral key for this gift wrap
     // Note: Ephemeral keys are temporary and only used for gift wrapping
     // These are NOT user keys - they're generated per message for privacy
@@ -2374,9 +3055,11 @@ async function createAndPublishGiftWrap(seal, recipientPubkey, publishRelays, re
         await Promise.any(publishPromises);
         console.log('Gift wrap published successfully to at least one relay');
     } catch (error) {
-        // If all relays fail, log but don't throw - we still want to show the message locally
-        console.warn('Failed to publish gift wrap to all relays:', error);
-        // Don't throw - allow the message to appear locally even if publish fails
+        if (options.requireSuccess) {
+            throw new Error('Failed to publish gift wrap to recipient inbox relays.');
+        }
+        // If all relays fail for non-required copies, log but keep UI responsive.
+        console.warn('Failed to publish optional gift wrap copy to all relays:', error);
     }
 }
 
@@ -2416,5 +3099,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     initEmojiPicker();
     initNewChatUi();
+    initSettingsUi();
+    initImageLightbox();
 });
 
