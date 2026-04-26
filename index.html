@@ -145,38 +145,63 @@
                 <button type="button" class="modal-close" id="settingsModalClose" aria-label="Close">×</button>
             </div>
             <div class="settings-scroll">
-            <div class="settings-section">
-                <div class="settings-section-title">DM Inbox Relays (kind 10050)</div>
-                <p class="settings-section-note">These are the relays others should use to deliver your private messages.</p>
-                <div class="settings-relay-row">
-                    <input type="url" class="modal-search settings-relay-input" id="settingsRelayInput" value="wss://" placeholder="wss://inbox.example.com" autocomplete="off" spellcheck="false" />
-                    <button type="button" class="settings-add-btn" id="settingsRelayAddBtn">Add</button>
+            <details class="settings-section" open>
+                <summary class="settings-section-summary">
+                    <span class="settings-section-title">DM Inbox Relays (kind 10050)</span>
+                </summary>
+                <div class="settings-section-body">
+                    <p class="settings-section-note">These are the relays others should use to deliver your private messages.</p>
+                    <div class="settings-relay-row">
+                        <input type="url" class="modal-search settings-relay-input" id="settingsRelayInput" value="wss://" placeholder="wss://inbox.example.com" autocomplete="off" spellcheck="false" />
+                        <button type="button" class="settings-add-btn" id="settingsRelayAddBtn">Add</button>
+                    </div>
+                    <div class="settings-relay-list" id="settingsRelayList"></div>
+                    <p class="modal-footnote" id="settingsRelayStatus" aria-live="polite"></p>
+                    <div class="settings-actions">
+                        <button type="button" class="btn settings-save-btn" id="settingsSaveBtn">Save relays</button>
+                    </div>
                 </div>
-                <div class="settings-relay-list" id="settingsRelayList"></div>
-                <p class="modal-footnote" id="settingsRelayStatus" aria-live="polite"></p>
-                <div class="settings-actions">
-                    <button type="button" class="btn settings-save-btn" id="settingsSaveBtn">Save relays</button>
+            </details>
+            <details class="settings-section settings-section--emoji" open>
+                <summary class="settings-section-summary">
+                    <span class="settings-section-title">Reaction Emoji Set</span>
+                </summary>
+                <div class="settings-section-body">
+                    <p class="settings-section-note">Current set preview (quick picker uses first 5). Import from discovery, then save.</p>
+                    <div class="settings-emoji-preview" id="settingsEmojiPreview"></div>
+                    <p class="modal-footnote" id="settingsEmojiStatus" aria-live="polite"></p>
+                    <div class="settings-actions settings-actions--split settings-emoji-actions">
+                        <button type="button" class="settings-add-btn settings-emoji-reset-btn" id="settingsEmojiResetBtn">Reset default</button>
+                        <button type="button" class="btn settings-save-btn settings-emoji-save-btn" id="settingsEmojiSaveBtn">Save emoji set</button>
+                    </div>
                 </div>
-            </div>
-            <div class="settings-section settings-section--emoji">
-                <div class="settings-section-title">Reaction Emoji Set</div>
-                <p class="settings-section-note">Current set preview (quick picker uses first 5). Import from discovery, then save.</p>
-                <div class="settings-emoji-preview" id="settingsEmojiPreview"></div>
-                <p class="modal-footnote" id="settingsEmojiStatus" aria-live="polite"></p>
-                <div class="settings-actions settings-actions--split settings-emoji-actions">
-                    <button type="button" class="settings-add-btn settings-emoji-reset-btn" id="settingsEmojiResetBtn">Reset default</button>
-                    <button type="button" class="btn settings-save-btn settings-emoji-save-btn" id="settingsEmojiSaveBtn">Save emoji set</button>
+            </details>
+            <details class="settings-section settings-section--emoji-discover">
+                <summary class="settings-section-summary">
+                    <span class="settings-section-title">Discover Emoji Sets</span>
+                </summary>
+                <div class="settings-section-body">
+                    <p class="settings-section-note">Browse public sets from connected relays and import one into your editor.</p>
+                    <div class="settings-actions">
+                        <button type="button" class="settings-add-btn" id="settingsEmojiDiscoverBtn">Refresh</button>
+                    </div>
+                    <div class="settings-relay-list settings-emoji-discover-list" id="settingsEmojiDiscoverList"></div>
+                    <p class="modal-footnote" id="settingsEmojiDiscoverStatus" aria-live="polite"></p>
                 </div>
-            </div>
-            <div class="settings-section settings-section--emoji-discover">
-                <div class="settings-section-title">Discover Emoji Sets</div>
-                <p class="settings-section-note">Browse public sets from connected relays and import one into your editor.</p>
-                <div class="settings-actions">
-                    <button type="button" class="settings-add-btn" id="settingsEmojiDiscoverBtn">Refresh</button>
+            </details>
+            <details class="settings-section settings-section--sync">
+                <summary class="settings-section-summary">
+                    <span class="settings-section-title">Inbox sync</span>
+                </summary>
+                <div class="settings-section-body">
+                    <p class="settings-section-note">Re-fetch gift wraps from relays if messages or reactions look incomplete or stale.</p>
+                    <div class="settings-actions settings-actions--split">
+                        <button type="button" class="btn settings-save-btn" id="settingsSyncNowBtn">Sync now</button>
+                        <button type="button" class="settings-add-btn settings-sync-log-btn" id="settingsSyncLogBtn">Log sync stats</button>
+                    </div>
+                    <p class="modal-footnote" id="settingsSyncStatus" aria-live="polite"></p>
                 </div>
-                <div class="settings-relay-list settings-emoji-discover-list" id="settingsEmojiDiscoverList"></div>
-                <p class="modal-footnote" id="settingsEmojiDiscoverStatus" aria-live="polite"></p>
-            </div>
+            </details>
             </div>
         </div>
     </div>

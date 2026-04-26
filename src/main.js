@@ -31,6 +31,25 @@ const conversationItemEls = new Map();
 const seenRumorIds = new Set();
 /** Reactions that arrive before their target message. */
 const pendingReactionsByMessageId = new Map();
+/** First time we queued a reaction whose target message is still missing (for stale gap-fill). */
+const pendingReactionFirstSeen = new Map();
+/** Lightweight connect / read health for ordering relay lists. */
+const relayReadStats = new Map();
+const syncTelemetry = {
+    giftWrapDecryptFail: 0,
+    sealDecryptFail: 0,
+    rumorUnsupported: 0,
+    gapFillRuns: 0,
+    manualSyncRuns: 0,
+    querySyncCalls: 0,
+    querySyncErrors: 0,
+    querySyncMsTotal: 0,
+    ingestEventsReceived: 0,
+    ingestHandlerErrors: 0,
+    incrementalRuns: 0,
+    repairRuns: 0
+};
+let manualInboxSyncInFlight = false;
 const DEFAULT_QUICK_REACTIONS = ['🤙', '💜', '👍', '😂', '🚀'];
 const DEFAULT_EXTRA_REACTIONS = ['🔥', '👏', '🙏', '🎉', '👀', '💯', '🤯', '🥲', '😎', '🤔'];
 const CUSTOM_REACTION_SET_KIND = 30030;
@@ -54,6 +73,7 @@ const INCREMENTAL_INBOX_MAX_PAGES = 2;
 const GAP_FILL_DEBOUNCE_MS = 450;
 const GAP_FILL_COOLDOWN_MS = 8000;
 const GAP_FILL_MAX_PAGES = 5;
+const STALE_PENDING_REACTION_MS = 90_000;
 
 let conversationsListUpdateQueued = false;
 function queueConversationsListUpdate() {
@@ -735,6 +755,12 @@ async function openSettingsModal() {
     const discoverStatus = document.getElementById('settingsEmojiDiscoverStatus');
     if (!modal || !publicKey) return;
     modal.hidden = false;
+    const collapsibles = modal.querySelectorAll('.settings-section');
+    collapsibles.forEach((section) => {
+        if (section instanceof HTMLDetailsElement) {
+            section.open = false;
+        }
+    });
     syncBodyOverlayLock();
     await loadOwnCustomReactionSetFromNostr();
     settingsRelayDraft = await fetchKind10050Relays(publicKey);
@@ -763,6 +789,11 @@ async function openSettingsModal() {
     }
     discoveredEmojiSets = [];
     renderDiscoveredEmojiSets();
+    const syncStatus = document.getElementById('settingsSyncStatus');
+    if (syncStatus && !manualInboxSyncInFlight) {
+        syncStatus.textContent = '';
+    }
+    updateSettingsSyncUiState();
 }
 
 function closeSettingsModal() {
@@ -911,6 +942,23 @@ function initSettingsUi() {
             void discoverEmojiSets();
         });
     }
+    const syncNowBtn = document.getElementById('settingsSyncNowBtn');
+    const syncLogBtn = document.getElementById('settingsSyncLogBtn');
+    if (syncNowBtn) {
+        syncNowBtn.addEventListener('click', () => {
+            void runManualInboxSyncNow();
+        });
+    }
+    if (syncLogBtn) {
+        syncLogBtn.addEventListener('click', () => {
+            logSyncTelemetrySnapshot();
+            const syncStatus = document.getElementById('settingsSyncStatus');
+            if (syncStatus) {
+                syncStatus.textContent = 'Stats logged to the browser console.';
+            }
+        });
+    }
+    updateSettingsSyncUiState();
 }
 
 function openImageLightbox(src) {
@@ -1321,6 +1369,7 @@ async function connectWithExtension() {
             gapFillDebounceByConv.clear();
             gapFillLastRunMs.clear();
             conversationRepairRunning.clear();
+            resetSessionSyncState();
             try {
                 pool.destroy();
             } catch (e) {
@@ -1370,6 +1419,7 @@ async function connectWithExtension() {
         // History uses paginated querySync (relay result caps) + batched UI updates for mobile perf.
         subscribeToMessages();
         startIncrementalInboxSync();
+        updateSettingsSyncUiState();
         void fetchHistoricalGiftWraps().finally(() => {
             setInboxLoading(false);
         });
@@ -1470,8 +1520,101 @@ async function fetchKind10050Relays(authorPubkey, options = {}) {
 }
 
 /** Read from both default + discovered inbox relays to reduce missed events on flaky/mobile sockets. */
-function getReadRelayUrls() {
+function getReadRelayUrlsUnsorted() {
     return [...new Set([...(dmRelayUrls || []), ...RELAY_URLS])];
+}
+
+function recordRelayReadStat(url, ok, latencyMs = 0) {
+    const u = String(url || '');
+    if (!u) return;
+    let s = relayReadStats.get(u);
+    if (!s) {
+        s = { ok: 0, fail: 0, lastMs: 500 };
+        relayReadStats.set(u, s);
+    }
+    if (ok) {
+        s.ok += 1;
+        s.lastMs = Math.max(1, latencyMs || 1);
+    } else {
+        s.fail += 1;
+    }
+}
+
+/** Prefer relays with higher recent success rate and lower last connect latency. */
+function sortRelaysForRead(urls) {
+    const arr = [...new Set(urls)];
+    return arr.sort((a, b) => {
+        const sa = relayReadStats.get(a) || { ok: 0, fail: 0, lastMs: 500 };
+        const sb = relayReadStats.get(b) || { ok: 0, fail: 0, lastMs: 500 };
+        const na = sa.ok + sa.fail;
+        const nb = sb.ok + sb.fail;
+        const ra = na ? sa.ok / na : 0.5;
+        const rb = nb ? sb.ok / nb : 0.5;
+        if (rb !== ra) {
+            return rb - ra;
+        }
+        return sa.lastMs - sb.lastMs;
+    });
+}
+
+function getReadRelayUrls() {
+    return sortRelaysForRead(getReadRelayUrlsUnsorted());
+}
+
+function resetSessionSyncState() {
+    for (const k of Object.keys(syncTelemetry)) {
+        if (typeof syncTelemetry[k] === 'number') {
+            syncTelemetry[k] = 0;
+        }
+    }
+    relayReadStats.clear();
+    pendingReactionFirstSeen.clear();
+}
+
+function logSyncTelemetrySnapshot() {
+    const relaySnapshot = {};
+    for (const [url, s] of relayReadStats) {
+        const n = s.ok + s.fail;
+        relaySnapshot[url] = {
+            ok: s.ok,
+            fail: s.fail,
+            successRate: n ? Number((s.ok / n).toFixed(3)) : null,
+            lastConnectMs: s.lastMs
+        };
+    }
+    const avgMs = syncTelemetry.querySyncCalls
+        ? Math.round(syncTelemetry.querySyncMsTotal / syncTelemetry.querySyncCalls)
+        : 0;
+    console.info('[bullishchat sync telemetry]', {
+        ...syncTelemetry,
+        avgQuerySyncMs: avgMs,
+        pendingOrphanReactionTargets: pendingReactionsByMessageId.size,
+        pendingFirstSeenTracked: pendingReactionFirstSeen.size,
+        relayReadHealth: relaySnapshot
+    });
+}
+
+function kickStalePendingReactions() {
+    const now = Date.now();
+    const convs = new Set();
+    for (const [msgId, firstSeen] of pendingReactionFirstSeen) {
+        if (now - firstSeen < STALE_PENDING_REACTION_MS) {
+            continue;
+        }
+        const list = pendingReactionsByMessageId.get(msgId);
+        if (!list?.length) {
+            pendingReactionFirstSeen.delete(msgId);
+            continue;
+        }
+        for (const p of list) {
+            if (p?.conversationPubkey) {
+                convs.add(normalizePubkey(p.conversationPubkey));
+            }
+        }
+    }
+    for (const pk of convs) {
+        scheduleGapFillForConversation(pk);
+    }
 }
 
 function noteInboxGiftWrapProcessed(createdAt) {
@@ -1489,20 +1632,39 @@ function noteInboxGiftWrapProcessed(createdAt) {
  */
 async function ingestPagedGiftWraps(readRelays, buildFilter, opts) {
     const { pageLimit, maxPages, maxWaitBase, suppressUi = true } = opts;
+    const ordered = sortRelaysForRead([...new Set(readRelays)]);
     let until;
     for (let page = 0; page < maxPages; page++) {
         const filter = buildFilter(until);
         filter.limit = pageLimit;
-        const maxWait = Math.min(65000, maxWaitBase + readRelays.length * 3500);
-        const events = await pool.querySync(readRelays, filter, { maxWait });
+        let baseMw = Math.min(65000, maxWaitBase + ordered.length * 3500);
+        let events;
+        for (let attempt = 0; attempt < 2; attempt++) {
+            const maxWait = attempt === 0 ? baseMw : Math.min(65000, Math.floor(baseMw * 1.85));
+            syncTelemetry.querySyncCalls += 1;
+            const t0 = Date.now();
+            try {
+                events = await pool.querySync(ordered, filter, { maxWait });
+                syncTelemetry.querySyncMsTotal += Date.now() - t0;
+                break;
+            } catch (qe) {
+                syncTelemetry.querySyncErrors += 1;
+                if (attempt === 1) {
+                    console.warn('ingestPagedGiftWraps querySync failed after retry:', qe);
+                    events = [];
+                }
+            }
+        }
         if (!events?.length) {
             break;
         }
+        syncTelemetry.ingestEventsReceived += events.length;
         events.sort((a, b) => a.created_at - b.created_at);
         for (const ev of events) {
             try {
                 await handleGiftWrappedMessage(ev, { suppressUi });
             } catch (err) {
+                syncTelemetry.ingestHandlerErrors += 1;
                 console.warn('ingestPagedGiftWraps: handle error:', err);
             }
         }
@@ -1532,6 +1694,7 @@ async function runIncrementalInboxSync() {
         return;
     }
     incrementalInboxInFlight = true;
+    syncTelemetry.incrementalRuns += 1;
     try {
         const readRelays = getReadRelayUrls();
         const nowSec = Math.floor(Date.now() / 1000);
@@ -1561,6 +1724,7 @@ async function runIncrementalInboxSync() {
         console.warn('Incremental inbox sync failed:', err);
     } finally {
         incrementalInboxInFlight = false;
+        kickStalePendingReactions();
     }
 }
 
@@ -1605,6 +1769,7 @@ async function runGapFillForConversation(conversationPubkey) {
         return;
     }
     gapFillLastRunMs.set(pk, now);
+    syncTelemetry.gapFillRuns += 1;
 
     const readRelays = getReadRelayUrls();
     const since = Math.floor(Date.now() / 1000) - CONVERSATION_REPAIR_LOOKBACK_SECS;
@@ -1640,10 +1805,14 @@ async function runGapFillForConversation(conversationPubkey) {
 async function connectRelaySet(relays) {
     const statuses = await Promise.all(
         relays.map(async (url) => {
+            const t0 = Date.now();
             try {
                 await pool.ensureRelay(url);
+                const ms = Date.now() - t0;
+                recordRelayReadStat(url, true, ms);
                 return { url, success: true };
             } catch (err) {
+                recordRelayReadStat(url, false, 0);
                 console.warn('Failed to connect to relay:', url, err);
                 return { url, success: false };
             }
@@ -1683,13 +1852,14 @@ function getRandomPastTimestamp() {
 }
 
 /** Pull stored kind 1059 from relays (paginated: many relays cap events per REQ). */
-async function fetchHistoricalGiftWraps() {
+async function fetchHistoricalGiftWraps(options = {}) {
     if (!pool || !publicKey) return;
 
     const readRelays = getReadRelayUrls();
     const pageLimit = 500;
-    const maxPages = 40;
-    const maxWait = Math.min(65000, 20000 + readRelays.length * 6000);
+    const manual = Boolean(options.manual);
+    const maxPages = manual ? 55 : 40;
+    const maxWaitBase = manual ? 35000 : 20000;
     let until;
 
     try {
@@ -1703,11 +1873,32 @@ async function fetchHistoricalGiftWraps() {
                 filter.until = until;
             }
 
-            const events = await pool.querySync(readRelays, filter, { maxWait });
-            if (!events.length) {
+            let baseMw = Math.min(
+                manual ? 90000 : 65000,
+                maxWaitBase + readRelays.length * (manual ? 8000 : 6000)
+            );
+            let events;
+            for (let attempt = 0; attempt < 2; attempt++) {
+                const maxWait = attempt === 0 ? baseMw : Math.min(manual ? 90000 : 65000, Math.floor(baseMw * 1.85));
+                syncTelemetry.querySyncCalls += 1;
+                const t0 = Date.now();
+                try {
+                    events = await pool.querySync(readRelays, filter, { maxWait });
+                    syncTelemetry.querySyncMsTotal += Date.now() - t0;
+                    break;
+                } catch (qe) {
+                    syncTelemetry.querySyncErrors += 1;
+                    if (attempt === 1) {
+                        console.warn('Historical gift wrap querySync failed after retry:', qe);
+                        events = [];
+                    }
+                }
+            }
+            if (!events?.length) {
                 break;
             }
 
+            syncTelemetry.ingestEventsReceived += events.length;
             events.sort((a, b) => a.created_at - b.created_at);
             const oldest = events[0].created_at;
 
@@ -1715,6 +1906,7 @@ async function fetchHistoricalGiftWraps() {
                 try {
                     await handleGiftWrappedMessage(ev, { suppressUi: true });
                 } catch (err) {
+                    syncTelemetry.ingestHandlerErrors += 1;
                     console.error('Error handling historical gift wrap:', err);
                 }
             }
@@ -1738,7 +1930,7 @@ async function fetchHistoricalGiftWraps() {
 
 /**
  * Repair fetch when opening a thread: paginated kind-1059 backfill so we are not limited to one relay response page.
- * @param {{ deep?: boolean }} [options] — deep: more pages / larger page size (from openChat on mobile-heavy paths)
+ * @param {{ deep?: boolean, force?: boolean }} [options] — deep: more pages / larger page size; force: bypass cooldown (manual sync)
  */
 async function fetchConversationRepair(conversationPubkey, options = {}) {
     if (!pool || !publicKey || !conversationPubkey) {
@@ -1751,11 +1943,12 @@ async function fetchConversationRepair(conversationPubkey, options = {}) {
 
     const now = Date.now();
     const last = conversationRepairLastRunMs.get(pk) || 0;
-    if (now - last < CONVERSATION_REPAIR_COOLDOWN_MS) {
+    if (!options.force && now - last < CONVERSATION_REPAIR_COOLDOWN_MS) {
         return;
     }
     conversationRepairLastRunMs.set(pk, now);
     conversationRepairRunning.add(pk);
+    syncTelemetry.repairRuns += 1;
 
     try {
         const readRelays = getReadRelayUrls();
@@ -1783,6 +1976,58 @@ async function fetchConversationRepair(conversationPubkey, options = {}) {
     if (currentChat === pk) {
         displayMessages(pk);
         updateChatHeader(pk);
+    }
+}
+
+function updateSettingsSyncUiState() {
+    const syncBtn = document.getElementById('settingsSyncNowBtn');
+    const logBtn = document.getElementById('settingsSyncLogBtn');
+    const canUse = Boolean(pool && publicKey);
+    if (syncBtn) {
+        syncBtn.disabled = !canUse || manualInboxSyncInFlight;
+    }
+    if (logBtn) {
+        logBtn.disabled = !canUse;
+    }
+}
+
+async function runManualInboxSyncNow() {
+    const statusEl = document.getElementById('settingsSyncStatus');
+    const syncBtn = document.getElementById('settingsSyncNowBtn');
+    if (!pool || !publicKey) {
+        if (statusEl) statusEl.textContent = 'Connect your extension first.';
+        return;
+    }
+    if (manualInboxSyncInFlight) {
+        if (statusEl) statusEl.textContent = 'Sync already running…';
+        return;
+    }
+    manualInboxSyncInFlight = true;
+    syncTelemetry.manualSyncRuns += 1;
+    try {
+        if (syncBtn) syncBtn.disabled = true;
+        if (statusEl) statusEl.textContent = 'Reconnecting relays…';
+        await connectRelaySet(getReadRelayUrlsUnsorted());
+        if (statusEl) statusEl.textContent = 'Fetching full history…';
+        await fetchHistoricalGiftWraps({ manual: true });
+        if (currentChat) {
+            if (statusEl) statusEl.textContent = 'Repairing open conversation…';
+            await fetchConversationRepair(currentChat, { deep: true, force: true });
+        }
+        if (statusEl) statusEl.textContent = 'Running incremental check…';
+        await runIncrementalInboxSync();
+        if (statusEl) statusEl.textContent = 'Sync finished.';
+        updateConversationsList();
+        if (currentChat) {
+            displayMessages(currentChat);
+            updateChatHeader(currentChat);
+        }
+    } catch (e) {
+        console.error('Manual inbox sync failed:', e);
+        if (statusEl) statusEl.textContent = 'Sync failed. Check console and try again.';
+    } finally {
+        manualInboxSyncInFlight = false;
+        updateSettingsSyncUiState();
     }
 }
 
@@ -2194,6 +2439,7 @@ function applyPendingReactionsForMessage(conversationPubkey, message) {
         pendingReactionsByMessageId.set(message.id, remaining);
     } else {
         pendingReactionsByMessageId.delete(message.id);
+        pendingReactionFirstSeen.delete(message.id);
     }
 }
 
@@ -2228,6 +2474,9 @@ function handleReactionRumor(rumor, conversationPubkey, authorPubkey) {
         const pending = pendingReactionsByMessageId.get(targetMessageId) || [];
         pending.push({ conversationPubkey, emoji, fromPubkey: authorPubkey });
         pendingReactionsByMessageId.set(targetMessageId, pending);
+        if (!pendingReactionFirstSeen.has(targetMessageId)) {
+            pendingReactionFirstSeen.set(targetMessageId, Date.now());
+        }
         scheduleGapFillForConversation(conversationPubkey);
     }
     return true;
@@ -2331,6 +2580,7 @@ async function handleGiftWrappedMessage(giftWrap, options = {}) {
         } catch (decryptError) {
             // If decryption fails, this might be a message not intended for us
             // or encrypted with a different key/version. Skip it silently.
+            syncTelemetry.giftWrapDecryptFail += 1;
             console.warn('Failed to decrypt gift wrap (may not be for us or wrong encryption):', {
                 error: decryptError.message,
                 eventId: giftWrap.id,
@@ -2375,6 +2625,7 @@ async function handleGiftWrappedMessage(giftWrap, options = {}) {
             console.log('Successfully decrypted seal');
         } catch (decryptError) {
             // If seal decryption fails, skip this message
+            syncTelemetry.sealDecryptFail += 1;
             console.warn('Failed to decrypt seal (may not be for us or wrong encryption):', {
                 error: decryptError.message,
                 eventId: giftWrap.id,
@@ -2390,6 +2641,7 @@ async function handleGiftWrappedMessage(giftWrap, options = {}) {
         try {
             // Step 4: NIP-17 — kind 14 DMs, kind 7 reactions, kind 15 file messages (see nips/17.md).
             if (rumor.kind !== 14 && rumor.kind !== 7 && rumor.kind !== 15) {
+                syncTelemetry.rumorUnsupported += 1;
                 console.warn('Unsupported rumor kind inside gift wrap (skipping):', rumor.kind);
                 return;
             }
