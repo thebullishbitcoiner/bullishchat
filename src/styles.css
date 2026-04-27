@@ -77,7 +77,7 @@ body:not(.is-authenticated) .container {
 
 body:not(.is-authenticated) .sidebar {
     width: 100%;
-    max-width: 520px;
+    max-width: 680px;
     margin: 0 auto;
     border-right: none;
     background: transparent;
@@ -106,7 +106,7 @@ body:not(.is-authenticated) .sidebar-header {
 
 .app-title {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     flex-wrap: wrap;
     gap: 8px;
     font-family: 'Fraunces', Georgia, serif;
@@ -253,7 +253,7 @@ body:not(.is-authenticated) .status-indicator--compact {
     font-weight: 600;
     line-height: 1.18;
     color: var(--text-primary);
-    margin-bottom: 14px;
+    margin-bottom: 8px;
     animation: landing-rise 0.75s ease-out 0.06s both;
 }
 
@@ -261,7 +261,7 @@ body:not(.is-authenticated) .status-indicator--compact {
     font-size: 15px;
     line-height: 1.6;
     color: #9a9488;
-    max-width: 42ch;
+    max-width: 52ch;
     animation: landing-rise 0.8s ease-out 0.12s both;
 }
 
