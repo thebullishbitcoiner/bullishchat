@@ -309,6 +309,11 @@ function syncEmojiDiscoverDetailFromCatalog() {
     const k = discoverSetKey(emojiDiscoverDetailSet);
     const found = emojiDiscoverCatalog.find((s) => discoverSetKey(s) === k);
     emojiDiscoverDetailSet = found || null;
+    if (!emojiDiscoverDetailSet) return;
+    const qRaw = getEmojiDiscoverFilterQuery();
+    if (qRaw && !matchesEmojiDiscoverFilter(emojiDiscoverDetailSet, qRaw)) {
+        emojiDiscoverDetailSet = null;
+    }
 }
 
 function renderEmojiDiscoverDetailPanel(listEl, status) {
