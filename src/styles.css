@@ -1705,6 +1705,12 @@ body.is-authenticated .sidebar-fab:not([hidden]) {
     white-space: nowrap;
 }
 
+.new-chat-suggestion-nip05 {
+    font-size: 12px;
+    font-weight: 500;
+    color: #8a8274;
+}
+
 .new-chat-suggestion-npub {
     font-size: 11px;
     color: #6d685e;
@@ -1713,6 +1719,15 @@ body.is-authenticated .sidebar-fab:not([hidden]) {
     text-overflow: ellipsis;
     white-space: nowrap;
     font-family: ui-monospace, monospace;
+}
+
+.new-chat-suggestion-followers {
+    font-size: 11px;
+    color: #9a9387;
+    margin-top: 3px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .new-chat-suggestion-empty {

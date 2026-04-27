@@ -119,13 +119,16 @@ function queueActiveChatRender(pubkey, opts = {}) {
     }, 90);
 }
 
-/** nostr.wine search (kind 0); free tier ~1 req/s */
-const NOSTR_WINE_SEARCH_URL = 'https://api.nostr.wine/search';
+/** Nostr Archives search suggest endpoint. */
+const NOSTR_ARCHIVES_SEARCH_SUGGEST_URL = 'https://api.nostrarchives.com/v1/search/suggest';
+const NOSTR_ARCHIVES_PROFILES_METADATA_URL = 'https://api.nostrarchives.com/v1/profiles/metadata';
+const PROFILE_METADATA_BATCH_SIZE = 100;
 
-let wineSearchAbort = null;
-let wineSearchDebounceTimer = null;
-let wineSearchSerial = 0;
-let lastNostrWineRequestMs = 0;
+let profileSearchAbort = null;
+let profileSearchDebounceTimer = null;
+let profileSearchSerial = 0;
+let lastProfileSearchRequestMs = 0;
+const profileFetchInFlight = new Map();
 const conversationRepairLastRunMs = new Map();
 /** Per-thread repair so opening chat B is not blocked by chat A. */
 const conversationRepairRunning = new Set();
@@ -446,7 +449,7 @@ function setInboxLoading(loading) {
     }
 }
 
-function buildSearchHit(pubkey, displayName = null, picture = null) {
+function buildSearchHit(pubkey, displayName = null, picture = null, followerCount = null, nip05 = null) {
     const pk = normalizePubkey(pubkey);
     let label = displayName;
     if (!label) {
@@ -459,25 +462,36 @@ function buildSearchHit(pubkey, displayName = null, picture = null) {
     }
     let npubDisplay = pk.slice(0, 14) + '…';
     try {
-        npubDisplay = nip19.npubEncode(pk);
+        const npub = nip19.npubEncode(pk);
+        npubDisplay = npub.length > 22 ? `${npub.slice(0, 11)}:${npub.slice(-11)}` : npub;
     } catch {
         /* keep short hex */
     }
-    return { pubkey: pk, label, npubDisplay, picture };
+    return { pubkey: pk, label, npubDisplay, picture, followerCount, nip05 };
 }
 
-async function throttleNostrWine() {
-    const gap = 1050 - (Date.now() - lastNostrWineRequestMs);
+function formatFollowerCount(value) {
+    if (!Number.isFinite(value) || value < 0) {
+        return '';
+    }
+    const rounded = Math.round(value);
+    const compact = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(rounded);
+    return `${compact} follower${rounded === 1 ? '' : 's'}`;
+}
+
+async function throttleProfileSearch() {
+    // Keep comfortably below API limits while preserving quick typeahead UX.
+    const gap = 550 - (Date.now() - lastProfileSearchRequestMs);
     if (gap > 0) {
         await new Promise((r) => setTimeout(r, gap));
     }
-    lastNostrWineRequestMs = Date.now();
+    lastProfileSearchRequestMs = Date.now();
 }
 
 /**
  * @param {string} query
  * @param {AbortSignal} signal
- * @returns {Promise<Array<{ pubkey: string, label: string, npubDisplay: string, picture: string | null }>>}
+ * @returns {Promise<Array<{ pubkey: string, label: string, npubDisplay: string, picture: string | null, followerCount: number | null, nip05: string | null }>>}
  */
 async function fetchNostrUserSuggestions(query, signal) {
     const q = query.trim();
@@ -512,12 +526,12 @@ async function fetchNostrUserSuggestions(query, signal) {
         return [];
     }
 
-    await throttleNostrWine();
+    await throttleProfileSearch();
     if (signal.aborted) {
         return [];
     }
 
-    const url = `${NOSTR_WINE_SEARCH_URL}?${new URLSearchParams({ query: q, kind: '0', limit: '20' })}`;
+    const url = `${NOSTR_ARCHIVES_SEARCH_SUGGEST_URL}?${new URLSearchParams({ q, limit: '10' })}`;
     const res = await fetch(url, { signal, headers: { Accept: 'application/json' } });
     if (!res.ok) {
         throw new Error(`Search failed (${res.status})`);
@@ -526,11 +540,12 @@ async function fetchNostrUserSuggestions(query, signal) {
     const seen = new Set();
     const hits = [];
 
-    for (const ev of json.data || []) {
-        if (!ev || ev.kind !== 0 || !ev.pubkey) {
+    const suggestions = Array.isArray(json?.suggestions) ? json.suggestions : [];
+    for (const suggestion of suggestions) {
+        if (!suggestion?.pubkey) {
             continue;
         }
-        const pk = normalizePubkey(ev.pubkey);
+        const pk = normalizePubkey(suggestion.pubkey);
         if (publicKey && pk === publicKey) {
             continue;
         }
@@ -541,14 +556,17 @@ async function fetchNostrUserSuggestions(query, signal) {
 
         let label = pk.slice(0, 8) + '…' + pk.slice(-6);
         let picture = null;
-        try {
-            const meta = JSON.parse(ev.content || '{}');
-            label = meta.display_name || meta.displayName || meta.name || label;
-            picture = typeof meta.picture === 'string' && meta.picture.length > 0 ? meta.picture : null;
-        } catch {
-            /* ignore */
+        let followerCount = null;
+        let nip05 = null;
+        label = suggestion.display_name || suggestion.displayName || suggestion.name || label;
+        picture = typeof suggestion.picture === 'string' && suggestion.picture.length > 0 ? suggestion.picture : null;
+        if (Number.isFinite(suggestion.follower_count)) {
+            followerCount = Number(suggestion.follower_count);
         }
-        hits.push(buildSearchHit(pk, label, picture));
+        if (typeof suggestion.nip05 === 'string' && suggestion.nip05.trim()) {
+            nip05 = suggestion.nip05.trim();
+        }
+        hits.push(buildSearchHit(pk, label, picture, followerCount, nip05));
         if (hits.length >= 16) {
             break;
         }
@@ -604,10 +622,10 @@ function openNewChatModal() {
         return;
     }
     closeFabMenu();
-    wineSearchSerial += 1;
-    wineSearchAbort?.abort();
-    if (wineSearchDebounceTimer) {
-        clearTimeout(wineSearchDebounceTimer);
+    profileSearchSerial += 1;
+    profileSearchAbort?.abort();
+    if (profileSearchDebounceTimer) {
+        clearTimeout(profileSearchDebounceTimer);
     }
     modal.hidden = false;
     input.value = '';
@@ -617,7 +635,7 @@ function openNewChatModal() {
     }
     if (status) {
         status.textContent =
-            'Type a name, paste a full npub, or enter a 64-character hex pubkey. Name search uses nostr.wine (about 1 lookup per second).';
+            'Type a name, paste a full npub, or enter a 64-character hex pubkey.';
     }
     syncBodyOverlayLock();
     setTimeout(() => input.focus(), 50);
@@ -629,11 +647,11 @@ function closeNewChatModal() {
         modal.hidden = true;
     }
     syncBodyOverlayLock();
-    wineSearchAbort?.abort();
-    if (wineSearchDebounceTimer) {
-        clearTimeout(wineSearchDebounceTimer);
+    profileSearchAbort?.abort();
+    if (profileSearchDebounceTimer) {
+        clearTimeout(profileSearchDebounceTimer);
     }
-    wineSearchSerial += 1;
+    profileSearchSerial += 1;
 }
 
 function normalizeRelayUrl(raw) {
@@ -1007,25 +1025,25 @@ function initImageLightbox() {
 }
 
 function scheduleNewChatSearch(raw) {
-    wineSearchAbort?.abort();
-    const serial = ++wineSearchSerial;
+    profileSearchAbort?.abort();
+    const serial = ++profileSearchSerial;
     const statusEl = document.getElementById('newChatSearchStatus');
     const suggEl = document.getElementById('newChatSuggestions');
 
-    if (wineSearchDebounceTimer) {
-        clearTimeout(wineSearchDebounceTimer);
+    if (profileSearchDebounceTimer) {
+        clearTimeout(profileSearchDebounceTimer);
     }
 
-    wineSearchDebounceTimer = setTimeout(async () => {
-        wineSearchAbort = new AbortController();
-        const { signal } = wineSearchAbort;
+    profileSearchDebounceTimer = setTimeout(async () => {
+        profileSearchAbort = new AbortController();
+        const { signal } = profileSearchAbort;
         const q = raw.trim();
 
         try {
             if (q.length === 0) {
                 if (statusEl) {
                     statusEl.textContent =
-                        'Type a name, paste a full npub, or enter a 64-character hex pubkey. Name search uses nostr.wine (about 1 lookup per second).';
+                        'Type a name, paste a full npub, or enter a 64-character hex pubkey.';
                 }
                 if (suggEl) {
                     suggEl.innerHTML = '';
@@ -1050,7 +1068,7 @@ function scheduleNewChatSearch(raw) {
             }
 
             const hits = await fetchNostrUserSuggestions(q, signal);
-            if (serial !== wineSearchSerial) {
+            if (serial !== profileSearchSerial) {
                 return;
             }
             if (statusEl) {
@@ -1061,7 +1079,7 @@ function scheduleNewChatSearch(raw) {
             if (e?.name === 'AbortError') {
                 return;
             }
-            if (serial !== wineSearchSerial) {
+            if (serial !== profileSearchSerial) {
                 return;
             }
             console.warn('Nostr search failed:', e);
@@ -1117,11 +1135,23 @@ function renderNewChatSuggestions(hits) {
         const nameEl = document.createElement('div');
         nameEl.className = 'new-chat-suggestion-name';
         nameEl.textContent = hit.label;
+        if (typeof hit.nip05 === 'string' && hit.nip05.trim()) {
+            const nip05El = document.createElement('span');
+            nip05El.className = 'new-chat-suggestion-nip05';
+            nip05El.textContent = ` ${hit.nip05.trim()}`;
+            nameEl.appendChild(nip05El);
+        }
         const npubEl = document.createElement('div');
         npubEl.className = 'new-chat-suggestion-npub';
         npubEl.textContent = hit.npubDisplay;
         text.appendChild(nameEl);
         text.appendChild(npubEl);
+        if (Number.isFinite(hit.followerCount) && hit.followerCount >= 0) {
+            const followerEl = document.createElement('div');
+            followerEl.className = 'new-chat-suggestion-followers';
+            followerEl.textContent = formatFollowerCount(hit.followerCount);
+            text.appendChild(followerEl);
+        }
 
         row.appendChild(avEl);
         row.appendChild(text);
@@ -1431,16 +1461,52 @@ async function connectWithExtension() {
     }
 }
 
-// Fetch user profile (kind 0) to get display name
-async function fetchUserProfile(pubkey) {
-    if (userProfiles[pubkey]) {
-        return userProfiles[pubkey]; // Already cached
-    }
+function emptyUserProfile() {
+    return { name: null, display_name: null, picture: null, about: null, nip05: null };
+}
 
+function normalizeProfileMetadata(profile = {}) {
+    return {
+        name: profile.name || profile.display_name || null,
+        display_name: profile.display_name || profile.name || null,
+        picture: profile.picture || null,
+        about: profile.about || null,
+        nip05: profile.nip05 || null
+    };
+}
+
+async function fetchProfilesMetadataBatch(pubkeys) {
+    const keys = [...new Set(pubkeys.map((pk) => normalizePubkey(pk)).filter(Boolean))];
+    if (!keys.length) {
+        return new Map();
+    }
+    const res = await fetch(NOSTR_ARCHIVES_PROFILES_METADATA_URL, {
+        method: 'POST',
+        headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ pubkeys: keys })
+    });
+    if (!res.ok) {
+        throw new Error(`Profile metadata failed (${res.status})`);
+    }
+    const json = await res.json();
+    const out = new Map();
+    const profiles = Array.isArray(json?.profiles) ? json.profiles : [];
+    for (const profile of profiles) {
+        if (!profile?.pubkey) continue;
+        const pk = normalizePubkey(profile.pubkey);
+        out.set(pk, normalizeProfileMetadata(profile));
+    }
+    return out;
+}
+
+async function fetchUserProfileFromRelays(pubkey) {
     try {
         // Subscribe to kind 0 events for this user
         // Note: pool.subscribe takes a single filter object, not an array
-        return new Promise((resolve) => {
+        return await new Promise((resolve) => {
             const sub = pool.subscribe(RELAY_URLS, {
                 kinds: [0],
                 authors: [pubkey],
@@ -1449,12 +1515,7 @@ async function fetchUserProfile(pubkey) {
                 onevent(event) {
                     try {
                         const profile = JSON.parse(event.content);
-                        userProfiles[pubkey] = {
-                            name: profile.name || profile.display_name || null,
-                            display_name: profile.display_name || profile.name || null,
-                            picture: profile.picture || null,
-                            about: profile.about || null
-                        };
+                        userProfiles[pubkey] = normalizeProfileMetadata(profile);
                         sub.close();
                         resolve(userProfiles[pubkey]);
                     } catch (err) {
@@ -1462,9 +1523,8 @@ async function fetchUserProfile(pubkey) {
                     }
                 },
                 oneose() {
-                    // If no events found, set default
                     if (!userProfiles[pubkey]) {
-                        userProfiles[pubkey] = { name: null, display_name: null, picture: null, about: null };
+                        userProfiles[pubkey] = emptyUserProfile();
                     }
                     resolve(userProfiles[pubkey]);
                 }
@@ -1473,16 +1533,52 @@ async function fetchUserProfile(pubkey) {
             // Timeout after 3 seconds
             setTimeout(() => {
                 if (!userProfiles[pubkey]) {
-                    userProfiles[pubkey] = { name: null, display_name: null, picture: null, about: null };
+                    userProfiles[pubkey] = emptyUserProfile();
                     sub.close();
                     resolve(userProfiles[pubkey]);
                 }
             }, 3000);
         });
     } catch (error) {
-        console.error('Failed to fetch profile for', pubkey, error);
-        userProfiles[pubkey] = { name: null, display_name: null, picture: null, about: null };
-        return userProfiles[pubkey];
+        console.error('Relay profile fetch failed for', pubkey, error);
+        return null;
+    }
+}
+
+// Fetch user profile with hybrid strategy: API first, relay fallback.
+async function fetchUserProfile(pubkey) {
+    const pk = normalizePubkey(pubkey);
+    if (userProfiles[pk]) {
+        return userProfiles[pk]; // Already cached
+    }
+    if (profileFetchInFlight.has(pk)) {
+        return profileFetchInFlight.get(pk);
+    }
+
+    const pending = (async () => {
+        try {
+            const map = await fetchProfilesMetadataBatch([pk]);
+            const profile = map.get(pk);
+            if (profile) {
+                userProfiles[pk] = profile;
+                return profile;
+            }
+        } catch (error) {
+            console.warn('Nostr Archives metadata fetch failed for', pk, error);
+        }
+
+        const relayProfile = await fetchUserProfileFromRelays(pk);
+        if (relayProfile) {
+            return relayProfile;
+        }
+        userProfiles[pk] = emptyUserProfile();
+        return userProfiles[pk];
+    })();
+    profileFetchInFlight.set(pk, pending);
+    try {
+        return await pending;
+    } finally {
+        profileFetchInFlight.delete(pk);
     }
 }
 
@@ -1949,6 +2045,7 @@ async function fetchConversationRepair(conversationPubkey, options = {}) {
     conversationRepairLastRunMs.set(pk, now);
     conversationRepairRunning.add(pk);
     syncTelemetry.repairRuns += 1;
+    const beforeFp = getConversationFingerprint(pk);
 
     try {
         const readRelays = getReadRelayUrls();
@@ -1973,7 +2070,9 @@ async function fetchConversationRepair(conversationPubkey, options = {}) {
     }
 
     updateConversationsList();
-    if (currentChat === pk) {
+    const afterFp = getConversationFingerprint(pk);
+    const changed = beforeFp !== afterFp;
+    if (currentChat === pk && changed) {
         displayMessages(pk);
         updateChatHeader(pk);
     }
@@ -2033,14 +2132,43 @@ async function runManualInboxSyncNow() {
 
 /** After bulk inbox load, fetch display names without blocking decrypt. */
 function prefetchMissingConversationProfiles() {
-    for (const pubkey of Object.keys(conversations)) {
-        if (userProfiles[pubkey]) {
-            continue;
-        }
-        void fetchUserProfile(pubkey).then(() => {
+    const missingPubkeys = Object.keys(conversations).filter((pubkey) => !userProfiles[pubkey]);
+    if (!missingPubkeys.length) {
+        return;
+    }
+
+    const chunks = [];
+    for (let i = 0; i < missingPubkeys.length; i += PROFILE_METADATA_BATCH_SIZE) {
+        chunks.push(missingPubkeys.slice(i, i + PROFILE_METADATA_BATCH_SIZE));
+    }
+
+    for (const chunk of chunks) {
+        void (async () => {
+            const unresolved = [];
+            try {
+                const map = await fetchProfilesMetadataBatch(chunk);
+                for (const pubkey of chunk) {
+                    const profile = map.get(normalizePubkey(pubkey));
+                    if (profile) {
+                        userProfiles[pubkey] = profile;
+                    } else {
+                        unresolved.push(pubkey);
+                    }
+                }
+            } catch (error) {
+                console.warn('Batch profile metadata prefetch failed; falling back to relays.', error);
+                unresolved.push(...chunk);
+            }
+
+            if (unresolved.length) {
+                await Promise.allSettled(unresolved.map((pubkey) => fetchUserProfile(pubkey)));
+            }
+
             queueConversationsListUpdate();
-            queueChatHeaderUpdate(pubkey);
-        });
+            for (const pubkey of chunk) {
+                queueChatHeaderUpdate(pubkey);
+            }
+        })();
     }
 }
 
@@ -2755,6 +2883,28 @@ function lastConversationSortTime(conv) {
         return 0;
     }
     return conv[conv.length - 1].timestamp;
+}
+
+/**
+ * Lightweight render fingerprint so we avoid repainting an unchanged conversation
+ * after background repair/backfill queries complete.
+ */
+function getConversationFingerprint(pubkey) {
+    const conv = conversations[pubkey] || [];
+    if (!conv.length) {
+        return 'empty';
+    }
+    const parts = [`n:${conv.length}`];
+    for (const msg of conv) {
+        const rid = msg?.id || '';
+        const kind = msg?.kind || 14;
+        const ts = msg?.timestamp || 0;
+        const rc = msg?.reactions
+            ? Object.values(msg.reactions).reduce((sum, bucket) => sum + (bucket?.count || 0), 0)
+            : 0;
+        parts.push(`${rid}:${kind}:${ts}:r${rc}`);
+    }
+    return parts.join('|');
 }
 
 function avatarInitialFromLabel(label, pubkey = '') {
