@@ -1,7 +1,7 @@
 {
   "name": "bullishchat",
-  "version": "0.10.2",
-  "description": "bullishChat - NIP-17 Private Messaging",
+  "version": "0.10.3",
+  "description": "Private messaging on Nostr. Sign in with a browser extension; keys never leave your wallet.",
   "type": "module",
   "scripts": {
     "dev": "vite",
