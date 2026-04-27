@@ -106,7 +106,7 @@ body:not(.is-authenticated) .sidebar-header {
 
 .app-title {
     display: flex;
-    align-items: center;
+    align-items: baseline;
     flex-wrap: wrap;
     gap: 8px;
     font-family: 'Fraunces', Georgia, serif;
