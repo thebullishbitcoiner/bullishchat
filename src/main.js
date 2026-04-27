@@ -54,6 +54,10 @@ const DEFAULT_QUICK_REACTIONS = ['🤙', '💜', '👍', '😂', '🚀'];
 const DEFAULT_EXTRA_REACTIONS = ['🔥', '👏', '🙏', '🎉', '👀', '💯', '🤯', '🥲', '😎', '🤔'];
 const CUSTOM_REACTION_SET_KIND = 30030;
 const CUSTOM_REACTION_SET_D_TAG = 'bullishchat-reaction-set';
+/** NIP-30 does not define a max; this caps kind 30030 size for UI and relay friendliness. */
+const MAX_CUSTOM_REACTION_EMOJIS = 256;
+const EMOJI_DISCOVERY_PAGE_LIMIT = 500;
+const EMOJI_DISCOVERY_MAX_PAGES = 10;
 const LIGHTNING_INVOICE_RE = /(lightning:)?(ln(?:bc|tb|bcrt|sb)[0-9a-z]+)/i;
 /** Detect bare http(s) URLs in message text for links / inline images (DOM-built, no HTML injection). */
 const HTTP_URL_IN_TEXT_RE = /\bhttps?:\/\/[^\s<>"'`]+/gi;
@@ -141,7 +145,11 @@ let isInboxLoading = false;
 let settingsRelayDraft = [];
 let customReactionEmojiSet = [];
 let customReactionEmojiUrlMap = {};
-let discoveredEmojiSets = [];
+/** Latest merged catalog from relay discovery (filter in UI without re-fetching). */
+let emojiDiscoverCatalog = [];
+/** When set, discover UI shows one catalog entry for per-emoji add. */
+let emojiDiscoverDetailSet = null;
+let emojiDiscoverSearchDebounce = null;
 let settingsEmojiDraftSet = [];
 let mobileCatchupTimer = null;
 
@@ -185,7 +193,7 @@ function normalizeCustomEmojiLines(raw) {
         seen.add(emoji);
         out.push(emoji);
     }
-    return out.slice(0, 64);
+    return out.slice(0, MAX_CUSTOM_REACTION_EMOJIS);
 }
 
 function parseCustomReactionSetEvent(ev) {
@@ -249,15 +257,156 @@ function shortAuthor(pubkey) {
     }
 }
 
+function getEmojiDiscoverFilterQuery() {
+    const el = document.getElementById('settingsEmojiDiscoverSearch');
+    return (el?.value || '').trim();
+}
+
+function tryDecodeNpubForDiscoverFilter(raw) {
+    const s = (raw || '').trim();
+    if (!s.toLowerCase().startsWith('npub')) return '';
+    try {
+        const dec = nip19.decode(s);
+        if (dec.type === 'npub') return normalizePubkey(dec.data);
+    } catch {
+        /* ignore malformed bech32 */
+    }
+    return '';
+}
+
+function matchesEmojiDiscoverFilter(set, qRaw) {
+    const q = qRaw.toLowerCase();
+    if (!q) return true;
+    const pk = normalizePubkey(set.pubkey || '');
+    const hexCandidate = q.replace(/\s/g, '');
+    if (hexCandidate.length === 64 && /^[0-9a-f]+$/i.test(hexCandidate)) {
+        if (pk === normalizePubkey(hexCandidate)) return true;
+    }
+    const npubPk = tryDecodeNpubForDiscoverFilter(qRaw);
+    if (npubPk && pk === npubPk) return true;
+    const name = (set.name || '').toLowerCase();
+    const d = (set.dTag || '').toLowerCase();
+    const disp = (getDisplayName(set.pubkey) || '').toLowerCase();
+    return name.includes(q) || d.includes(q) || pk.toLowerCase().includes(q) || disp.includes(q);
+}
+
+function getFilteredEmojiDiscoverRows() {
+    const qRaw = getEmojiDiscoverFilterQuery();
+    if (!qRaw) return emojiDiscoverCatalog;
+    return emojiDiscoverCatalog.filter((set) => matchesEmojiDiscoverFilter(set, qRaw));
+}
+
+function discoverSetKey(set) {
+    return `${set.pubkey}:${set.dTag || 'default'}`;
+}
+
+function syncEmojiDiscoverDetailFromCatalog() {
+    if (!emojiDiscoverDetailSet) return;
+    if (!emojiDiscoverCatalog.length) {
+        emojiDiscoverDetailSet = null;
+        return;
+    }
+    const k = discoverSetKey(emojiDiscoverDetailSet);
+    const found = emojiDiscoverCatalog.find((s) => discoverSetKey(s) === k);
+    emojiDiscoverDetailSet = found || null;
+}
+
+function renderEmojiDiscoverDetailPanel(listEl, status) {
+    const set = emojiDiscoverDetailSet;
+    if (!set) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'settings-emoji-discover-detail';
+
+    const backRow = document.createElement('div');
+    backRow.className = 'settings-emoji-discover-detail-bar';
+    const back = document.createElement('button');
+    back.type = 'button';
+    back.className = 'settings-add-btn settings-emoji-discover-back-btn';
+    back.textContent = '← All sets';
+    back.addEventListener('click', () => {
+        emojiDiscoverDetailSet = null;
+        renderDiscoveredEmojiSets();
+    });
+    backRow.appendChild(back);
+    wrap.appendChild(backRow);
+
+    const head = document.createElement('div');
+    head.className = 'settings-emoji-discover-detail-head';
+    const title = document.createElement('div');
+    title.className = 'settings-emoji-set-name';
+    title.textContent = set.name;
+    const sub = document.createElement('div');
+    sub.className = 'settings-emoji-set-meta';
+    const emojiLabel = set.count === 1 ? 'emoji' : 'emojis';
+    sub.textContent = `${set.count} ${emojiLabel} · by ${getDisplayName(set.pubkey)}`;
+    head.appendChild(title);
+    head.appendChild(sub);
+    wrap.appendChild(head);
+
+    const grid = document.createElement('div');
+    grid.className = 'settings-emoji-discover-detail-grid';
+    const urlMap = set.urlMap || {};
+    for (const token of set.emojis) {
+        const chip = document.createElement('div');
+        chip.className = 'settings-emoji-preview-chip';
+        const item = document.createElement('div');
+        item.className = 'settings-emoji-preview-item';
+        populateSettingsEmojiTileItem(item, token, urlMap);
+        const addBtn = document.createElement('button');
+        addBtn.type = 'button';
+        addBtn.className = 'settings-emoji-preview-add';
+        addBtn.textContent = '+';
+        const inDraft = settingsEmojiDraftSet.includes(token);
+        if (inDraft) {
+            addBtn.disabled = true;
+            addBtn.setAttribute('aria-label', 'Already in your reaction set');
+        } else {
+            addBtn.setAttribute('aria-label', 'Add reaction to your set');
+            addBtn.addEventListener('click', () => {
+                if (addDiscoveredEmojiTokenToDraft(set, token)) {
+                    renderDiscoveredEmojiSets();
+                }
+            });
+        }
+        chip.appendChild(item);
+        chip.appendChild(addBtn);
+        grid.appendChild(chip);
+    }
+    wrap.appendChild(grid);
+    listEl.appendChild(wrap);
+    if (status) {
+        status.textContent = `Browsing "${set.name}". Add reactions one at a time.`;
+    }
+}
+
 function renderDiscoveredEmojiSets() {
     const list = document.getElementById('settingsEmojiDiscoverList');
+    const status = document.getElementById('settingsEmojiDiscoverStatus');
     if (!list) return;
     list.innerHTML = '';
-    if (!discoveredEmojiSets.length) {
+    if (!emojiDiscoverCatalog.length) {
+        emojiDiscoverDetailSet = null;
         list.innerHTML = '<div class="new-chat-suggestion-empty" role="status">No emoji sets found on connected relays.</div>';
         return;
     }
-    for (const set of discoveredEmojiSets) {
+    syncEmojiDiscoverDetailFromCatalog();
+    if (emojiDiscoverDetailSet) {
+        renderEmojiDiscoverDetailPanel(list, status);
+        return;
+    }
+    const rows = getFilteredEmojiDiscoverRows();
+    if (!rows.length) {
+        list.innerHTML = '<div class="new-chat-suggestion-empty" role="status">No sets match your search.</div>';
+        if (status) status.textContent = `${emojiDiscoverCatalog.length} set(s); none match filter.`;
+        return;
+    }
+    if (status) {
+        const q = getEmojiDiscoverFilterQuery();
+        status.textContent = q
+            ? `Showing ${rows.length} of ${emojiDiscoverCatalog.length} (filtered).`
+            : `${emojiDiscoverCatalog.length} set(s) loaded.`;
+    }
+    for (const set of rows) {
         const row = document.createElement('div');
         row.className = 'settings-emoji-set-item';
 
@@ -293,20 +442,17 @@ function renderDiscoveredEmojiSets() {
         main.appendChild(meta);
         main.appendChild(preview);
 
-        const importBtn = document.createElement('button');
-        importBtn.type = 'button';
-        importBtn.className = 'settings-add-btn';
-        importBtn.textContent = 'Import';
-        importBtn.addEventListener('click', () => {
-            const status = document.getElementById('settingsEmojiStatus');
-            customReactionEmojiUrlMap = { ...(set.urlMap || {}) };
-            settingsEmojiDraftSet = [...set.emojis];
-            renderSettingsEmojiPreview(settingsEmojiDraftSet);
-            if (status) status.textContent = `Imported "${set.name}". Save to publish it on your profile.`;
+        const browseBtn = document.createElement('button');
+        browseBtn.type = 'button';
+        browseBtn.className = 'settings-add-btn';
+        browseBtn.textContent = 'Open';
+        browseBtn.addEventListener('click', () => {
+            emojiDiscoverDetailSet = set;
+            renderDiscoveredEmojiSets();
         });
 
         row.appendChild(main);
-        row.appendChild(importBtn);
+        row.appendChild(browseBtn);
         list.appendChild(row);
     }
 }
@@ -316,33 +462,40 @@ async function discoverEmojiSets() {
     if (status) status.textContent = 'Searching…';
     try {
         const relays = [...new Set([...(dmRelayUrls?.length ? dmRelayUrls : []), ...RELAY_URLS])];
-        const filter = { kinds: [CUSTOM_REACTION_SET_KIND], limit: 80 };
-        console.log('[emoji-discovery] querying relays:', relays);
-        console.log('[emoji-discovery] filter:', filter);
-        const events = await pool.querySync(
-            relays,
-            filter,
-            { maxWait: 12000 }
-        );
-        console.log('[emoji-discovery] raw event count:', Array.isArray(events) ? events.length : 0);
+        const ordered = sortRelaysForRead(relays);
         const newestByKey = new Map();
-        for (const ev of events || []) {
-            const d = getTagValue(ev.tags, 'd') || 'default';
-            const key = `${ev.pubkey}:${d}`;
-            const prev = newestByKey.get(key);
-            if (!prev || (ev.created_at || 0) > (prev.created_at || 0)) {
-                newestByKey.set(key, ev);
+        let until;
+        for (let page = 0; page < EMOJI_DISCOVERY_MAX_PAGES; page++) {
+            const filter = { kinds: [CUSTOM_REACTION_SET_KIND], limit: EMOJI_DISCOVERY_PAGE_LIMIT };
+            if (until !== undefined) filter.until = until;
+            const maxWait = Math.min(65000, 12000 + ordered.length * 2000);
+            const events = await pool.querySync(ordered, filter, { maxWait });
+            const n = Array.isArray(events) ? events.length : 0;
+            if (!n) break;
+            for (const ev of events) {
+                const d = getTagValue(ev.tags, 'd') || 'default';
+                const key = `${normalizePubkey(ev.pubkey)}:${d}`;
+                const prev = newestByKey.get(key);
+                if (!prev || (ev.created_at || 0) > (prev.created_at || 0)) {
+                    newestByKey.set(key, ev);
+                }
             }
+            events.sort((a, b) => (a.created_at || 0) - (b.created_at || 0));
+            if (n < EMOJI_DISCOVERY_PAGE_LIMIT) break;
+            until = (events[0].created_at || 0) - 1;
+            if (until < 1) break;
         }
-        console.log('[emoji-discovery] unique set keys:', newestByKey.size);
         const parsed = [];
         for (const ev of newestByKey.values()) {
             const parsedSet = parseCustomReactionSetMeta(ev);
             const emojis = parsedSet.emojis;
             if (!emojis.length) continue;
-            const name = getTagValue(ev.tags, 'name') || getTagValue(ev.tags, 'title') || getTagValue(ev.tags, 'd') || 'Untitled set';
+            const dTag = getTagValue(ev.tags, 'd') || 'default';
+            const name =
+                getTagValue(ev.tags, 'name') || getTagValue(ev.tags, 'title') || dTag || 'Untitled set';
             parsed.push({
-                pubkey: ev.pubkey,
+                pubkey: normalizePubkey(ev.pubkey),
+                dTag,
                 name,
                 emojis,
                 urlMap: parsedSet.urlMap,
@@ -351,24 +504,17 @@ async function discoverEmojiSets() {
             });
         }
         parsed.sort((a, b) => b.createdAt - a.createdAt);
-        discoveredEmojiSets = parsed.slice(0, 40);
-        if (discoveredEmojiSets.length) {
-            console.log(
-                '[emoji-discovery] top sets:',
-                discoveredEmojiSets.slice(0, 5).map((s) => ({
-                    name: s.name,
-                    author: s.pubkey,
-                    count: s.count
-                }))
-            );
-        } else {
-            console.log('[emoji-discovery] no parseable sets found from queried events');
-        }
+        emojiDiscoverCatalog = parsed;
+        await enrichDiscoverEmojiSetAuthors(emojiDiscoverCatalog.map((s) => s.pubkey));
+        syncEmojiDiscoverDetailFromCatalog();
         renderDiscoveredEmojiSets();
-        if (status) status.textContent = discoveredEmojiSets.length ? `${discoveredEmojiSets.length} set(s) found.` : 'No sets found.';
+        if (status && !emojiDiscoverCatalog.length) {
+            status.textContent = 'No parseable emoji sets found.';
+        }
     } catch (e) {
         console.error('[emoji-discovery] query failed:', e);
-        discoveredEmojiSets = [];
+        emojiDiscoverCatalog = [];
+        emojiDiscoverDetailSet = null;
         renderDiscoveredEmojiSets();
         if (status) status.textContent = 'Could not discover emoji sets.';
     }
@@ -708,6 +854,77 @@ function currentEmojiEditorText() {
     return list.join('\n');
 }
 
+function pruneCustomReactionEmojiUrlMapToDraft() {
+    const used = new Set();
+    for (const t of settingsEmojiDraftSet) {
+        const sc = emojiShortcodeFromToken(t);
+        if (sc) used.add(sc);
+    }
+    const next = {};
+    for (const key of Object.keys(customReactionEmojiUrlMap)) {
+        if (used.has(key)) next[key] = customReactionEmojiUrlMap[key];
+    }
+    customReactionEmojiUrlMap = next;
+}
+
+function removeEmojiFromDraftToken(token) {
+    settingsEmojiDraftSet = settingsEmojiDraftSet.filter((t) => t !== token);
+    pruneCustomReactionEmojiUrlMapToDraft();
+    renderSettingsEmojiPreview(settingsEmojiDraftSet);
+}
+
+/** Append one reaction from a discovered set; existing URLs win for the same shortcode. */
+function addDiscoveredEmojiTokenToDraft(set, token) {
+    const emojiStatus = document.getElementById('settingsEmojiStatus');
+    if (settingsEmojiDraftSet.includes(token)) {
+        if (emojiStatus) emojiStatus.textContent = 'That reaction is already in your set.';
+        return false;
+    }
+    if (settingsEmojiDraftSet.length >= MAX_CUSTOM_REACTION_EMOJIS) {
+        if (emojiStatus) {
+            emojiStatus.textContent = `Your set is full (${MAX_CUSTOM_REACTION_EMOJIS}). Remove one in Reaction Emoji Set before adding more.`;
+        }
+        return false;
+    }
+    const merged = normalizeCustomEmojiLines([...settingsEmojiDraftSet, token].join('\n'));
+    if (merged.length <= settingsEmojiDraftSet.length) {
+        if (emojiStatus) emojiStatus.textContent = 'Could not add that reaction.';
+        return false;
+    }
+    const sc = emojiShortcodeFromToken(token);
+    if (sc && set.urlMap?.[sc]) {
+        customReactionEmojiUrlMap = { [sc]: set.urlMap[sc], ...customReactionEmojiUrlMap };
+    }
+    settingsEmojiDraftSet = merged;
+    pruneCustomReactionEmojiUrlMapToDraft();
+    renderSettingsEmojiPreview(settingsEmojiDraftSet);
+    if (emojiStatus) {
+        emojiStatus.textContent = `Added a reaction from "${set.name}". Save to publish on Nostr.`;
+    }
+    return true;
+}
+
+function populateSettingsEmojiTileItem(item, token, urlMap) {
+    const shortcode = emojiShortcodeFromToken(token);
+    const url = shortcode ? (urlMap[shortcode] || '') : '';
+    if (url) {
+        const img = document.createElement('img');
+        img.src = url;
+        img.alt = token;
+        img.referrerPolicy = 'no-referrer';
+        img.loading = 'lazy';
+        item.appendChild(img);
+    } else if (shortcode) {
+        const miss = document.createElement('span');
+        miss.className = 'settings-emoji-preview-missing';
+        miss.textContent = '?';
+        miss.title = 'No image URL for this reaction';
+        item.appendChild(miss);
+    } else {
+        item.textContent = token;
+    }
+}
+
 function renderSettingsEmojiPreview(emojis) {
     const host = document.getElementById('settingsEmojiPreview');
     if (!host) return;
@@ -716,25 +933,34 @@ function renderSettingsEmojiPreview(emojis) {
         host.innerHTML = '<div class="new-chat-suggestion-empty" role="status">No emojis to preview.</div>';
         return;
     }
-    for (const token of emojis.slice(0, 64)) {
+    const list = emojis.slice(0, MAX_CUSTOM_REACTION_EMOJIS);
+    for (const token of list) {
+        const chip = document.createElement('div');
+        chip.className = 'settings-emoji-preview-chip';
         const item = document.createElement('div');
         item.className = 'settings-emoji-preview-item';
-        const shortcode = emojiShortcodeFromToken(token);
-        const url = shortcode ? customReactionEmojiUrlMap[shortcode] : '';
-        if (url) {
-            const img = document.createElement('img');
-            img.src = url;
-            img.alt = token;
-            img.referrerPolicy = 'no-referrer';
-            img.loading = 'lazy';
-            item.appendChild(img);
-        } else {
-            if (shortcode) {
-                continue;
-            }
-            item.textContent = token;
-        }
-        host.appendChild(item);
+        populateSettingsEmojiTileItem(item, token, customReactionEmojiUrlMap);
+        const rm = document.createElement('button');
+        rm.type = 'button';
+        rm.className = 'settings-emoji-preview-remove';
+        rm.setAttribute('aria-label', `Remove ${token} from set`);
+        rm.textContent = '×';
+        rm.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            removeEmojiFromDraftToken(token);
+        });
+        chip.appendChild(item);
+        chip.appendChild(rm);
+        host.appendChild(chip);
+    }
+    if (emojis.length > MAX_CUSTOM_REACTION_EMOJIS) {
+        const more = document.createElement('div');
+        more.className = 'new-chat-suggestion-empty';
+        more.style.gridColumn = '1 / -1';
+        more.style.marginTop = '4px';
+        more.textContent = `Showing first ${MAX_CUSTOM_REACTION_EMOJIS} of ${emojis.length}. Remove some to see the rest.`;
+        host.appendChild(more);
     }
 }
 
@@ -805,7 +1031,10 @@ async function openSettingsModal() {
     if (discoverStatus) {
         discoverStatus.textContent = 'Click refresh to discover public sets.';
     }
-    discoveredEmojiSets = [];
+    emojiDiscoverCatalog = [];
+    emojiDiscoverDetailSet = null;
+    const discoverSearch = document.getElementById('settingsEmojiDiscoverSearch');
+    if (discoverSearch) discoverSearch.value = '';
     renderDiscoveredEmojiSets();
     const syncStatus = document.getElementById('settingsSyncStatus');
     if (syncStatus && !manualInboxSyncInFlight) {
@@ -869,6 +1098,7 @@ function initSettingsUi() {
     const emojiResetBtn = document.getElementById('settingsEmojiResetBtn');
     const emojiStatus = document.getElementById('settingsEmojiStatus');
     const emojiDiscoverBtn = document.getElementById('settingsEmojiDiscoverBtn');
+    const emojiDiscoverSearch = document.getElementById('settingsEmojiDiscoverSearch');
 
     if (btn) {
         btn.addEventListener('click', () => {
@@ -958,6 +1188,15 @@ function initSettingsUi() {
     if (emojiDiscoverBtn) {
         emojiDiscoverBtn.addEventListener('click', () => {
             void discoverEmojiSets();
+        });
+    }
+    if (emojiDiscoverSearch) {
+        emojiDiscoverSearch.addEventListener('input', () => {
+            if (emojiDiscoverSearchDebounce) clearTimeout(emojiDiscoverSearchDebounce);
+            emojiDiscoverSearchDebounce = setTimeout(() => {
+                emojiDiscoverSearchDebounce = null;
+                renderDiscoveredEmojiSets();
+            }, 150);
         });
     }
     const syncNowBtn = document.getElementById('settingsSyncNowBtn');
@@ -1502,6 +1741,41 @@ async function fetchProfilesMetadataBatch(pubkeys) {
     return out;
 }
 
+/** Load kind-0 style metadata from Nostr Archives for emoji-set authors not already in cache. */
+async function enrichDiscoverEmojiSetAuthors(pubkeys) {
+    const keys = [
+        ...new Set(
+            (pubkeys || [])
+                .map((pk) => (typeof pk === 'string' && /^[a-fA-F0-9]{64}$/.test(pk) ? normalizePubkey(pk) : ''))
+                .filter(Boolean)
+        )
+    ];
+    const missing = keys.filter((pk) => {
+        const p = userProfiles[pk];
+        return !p || (!p.display_name && !p.name);
+    });
+    if (!missing.length) {
+        return;
+    }
+    try {
+        for (let i = 0; i < missing.length; i += PROFILE_METADATA_BATCH_SIZE) {
+            const slice = missing.slice(i, i + PROFILE_METADATA_BATCH_SIZE);
+            const map = await fetchProfilesMetadataBatch(slice);
+            for (const [pk, profile] of map) {
+                if (!profile || (!profile.display_name && !profile.name)) {
+                    continue;
+                }
+                userProfiles[pk] = {
+                    ...(userProfiles[pk] || emptyUserProfile()),
+                    ...profile
+                };
+            }
+        }
+    } catch (e) {
+        console.warn('[emoji-discovery] Nostr Archives author metadata failed:', e);
+    }
+}
+
 async function fetchUserProfileFromRelays(pubkey) {
     try {
         // Subscribe to kind 0 events for this user
@@ -1584,12 +1858,16 @@ async function fetchUserProfile(pubkey) {
 
 // Get display name for a pubkey (with fallback to short pubkey)
 function getDisplayName(pubkey) {
-    const profile = userProfiles[pubkey];
+    if (typeof pubkey !== 'string' || !pubkey) {
+        return '';
+    }
+    const pk = /^[a-fA-F0-9]{64}$/.test(pubkey) ? normalizePubkey(pubkey) : pubkey;
+    const profile = userProfiles[pk];
     if (profile && (profile.display_name || profile.name)) {
         return profile.display_name || profile.name;
     }
     // Fallback to short pubkey
-    return pubkey.slice(0, 8) + '...' + pubkey.slice(-8);
+    return pk.slice(0, 8) + '...' + pk.slice(-8);
 }
 
 /** Kind 10050: preferred relays to receive NIP-17 gift wraps (NIP-17 publishing + our subscription) */
