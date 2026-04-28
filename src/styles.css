@@ -1810,6 +1810,62 @@ body.is-authenticated .sidebar-fab:not([hidden]) {
     text-transform: uppercase;
 }
 
+.settings-section-heading {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.settings-info-tip {
+    position: relative;
+    display: none;
+    width: 16px;
+    height: 16px;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    color: #a89f90;
+    font-size: 11px;
+    line-height: 1;
+    font-weight: 700;
+    cursor: help;
+    flex-shrink: 0;
+}
+
+.settings-section[open] .settings-info-tip {
+    display: inline-flex;
+}
+
+.settings-info-tip::after {
+    content: attr(data-tip);
+    position: absolute;
+    left: 0;
+    top: calc(100% + 8px);
+    min-width: 220px;
+    max-width: 320px;
+    background: #0f0e0b;
+    border: 1px solid #2a261f;
+    color: #d8d0c6;
+    font-size: 12px;
+    line-height: 1.4;
+    padding: 8px 9px;
+    pointer-events: none;
+    opacity: 0;
+    transform: translateY(-2px);
+    transition: opacity 120ms ease, transform 120ms ease;
+    z-index: 12;
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 500;
+}
+
+.settings-info-tip:hover::after,
+.settings-info-tip:focus-visible::after {
+    opacity: 1;
+    transform: translateY(0);
+}
+
 .settings-section-note {
     font-size: 12px;
     color: #868073;
@@ -1865,6 +1921,79 @@ body.is-authenticated .sidebar-fab:not([hidden]) {
     margin: 0;
 }
 
+.settings-emoji-discover-loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    min-height: 140px;
+    padding: 24px 16px;
+    color: #cbc4b7;
+}
+
+.settings-emoji-loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    min-height: 140px;
+    padding: 24px 16px;
+    grid-column: 1 / -1;
+    color: #cbc4b7;
+}
+
+.settings-emoji-loading-spinner {
+    width: 24px;
+    height: 24px;
+    border: 2px solid rgba(255, 255, 255, 0.14);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: settings-emoji-discover-spin 0.7s linear infinite;
+}
+
+.settings-emoji-loading-msg {
+    margin: 0;
+    max-width: 280px;
+    font-size: 13px;
+    line-height: 1.45;
+    text-align: center;
+    color: #b6afa2;
+}
+
+.settings-emoji-discover-spinner {
+    width: 28px;
+    height: 28px;
+    border: 2px solid rgba(255, 255, 255, 0.14);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: settings-emoji-discover-spin 0.7s linear infinite;
+}
+
+@keyframes settings-emoji-discover-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .settings-emoji-loading-spinner,
+    .settings-emoji-discover-spinner {
+        animation: none;
+        border-top-color: rgba(232, 137, 12, 0.55);
+    }
+}
+
+.settings-emoji-discover-loading-msg {
+    margin: 0;
+    max-width: 280px;
+    font-size: 13px;
+    line-height: 1.45;
+    text-align: center;
+    color: #b6afa2;
+}
+
 .settings-emoji-set-item {
     display: flex;
     align-items: center;
@@ -1899,18 +2028,19 @@ body.is-authenticated .sidebar-fab:not([hidden]) {
 }
 
 .settings-emoji-set-preview {
+    --emoji-card-preview-size: clamp(18px, 7vw, var(--emoji-tile-size));
     margin-top: 4px;
     display: flex;
     align-items: center;
     gap: 6px;
-    min-height: var(--emoji-tile-size);
-    font-size: var(--emoji-tile-size);
+    min-height: var(--emoji-card-preview-size);
+    font-size: var(--emoji-card-preview-size);
     line-height: 1;
 }
 
 .settings-emoji-set-preview img {
-    width: var(--emoji-tile-size);
-    height: var(--emoji-tile-size);
+    width: var(--emoji-card-preview-size);
+    height: var(--emoji-card-preview-size);
     object-fit: contain;
     display: block;
 }
@@ -1919,9 +2049,9 @@ body.is-authenticated .sidebar-fab:not([hidden]) {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: var(--emoji-tile-size);
-    height: var(--emoji-tile-size);
-    font-size: var(--emoji-tile-size);
+    width: var(--emoji-card-preview-size);
+    height: var(--emoji-card-preview-size);
+    font-size: var(--emoji-card-preview-size);
     line-height: 1;
 }
 

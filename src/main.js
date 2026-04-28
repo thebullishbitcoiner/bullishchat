@@ -149,6 +149,9 @@ let customReactionEmojiUrlMap = {};
 let emojiDiscoverCatalog = [];
 /** When set, discover UI shows one catalog entry for per-emoji add. */
 let emojiDiscoverDetailSet = null;
+let emojiDiscoverInFlight = false;
+/** True after the first Discover query this app session (query runs once until reload). */
+let emojiDiscoverQueriedThisModalOpen = false;
 let emojiDiscoverSearchDebounce = null;
 let settingsEmojiDraftSet = [];
 let mobileCatchupTimer = null;
@@ -426,7 +429,7 @@ function renderDiscoveredEmojiSets() {
         meta.textContent = `${set.count} ${emojiLabel} · by ${getDisplayName(set.pubkey)}`;
         const preview = document.createElement('div');
         preview.className = 'settings-emoji-set-preview';
-        const previewTokens = set.emojis.slice(0, 7);
+        const previewTokens = set.emojis.slice(0, 4);
         for (const token of previewTokens) {
             const shortcode = emojiShortcodeFromToken(token);
             const url = shortcode ? (set.urlMap?.[shortcode] || '') : '';
@@ -462,9 +465,37 @@ function renderDiscoveredEmojiSets() {
     }
 }
 
+function renderEmojiDiscoverLoading(listEl) {
+    if (!listEl) return;
+    listEl.innerHTML = '';
+    const wrap = document.createElement('div');
+    wrap.className = 'settings-emoji-discover-loading';
+    wrap.setAttribute('role', 'status');
+    wrap.setAttribute('aria-busy', 'true');
+    wrap.setAttribute('aria-live', 'polite');
+    const spinner = document.createElement('span');
+    spinner.className = 'settings-emoji-discover-spinner';
+    spinner.setAttribute('aria-hidden', 'true');
+    const msg = document.createElement('p');
+    msg.className = 'settings-emoji-discover-loading-msg';
+    msg.textContent = 'Loading public emoji sets from your relays…';
+    wrap.appendChild(spinner);
+    wrap.appendChild(msg);
+    listEl.appendChild(wrap);
+}
+
 async function discoverEmojiSets() {
     const status = document.getElementById('settingsEmojiDiscoverStatus');
-    if (status) status.textContent = 'Searching…';
+    const list = document.getElementById('settingsEmojiDiscoverList');
+    if (!pool) {
+        if (status) status.textContent = 'Connect first.';
+        return;
+    }
+    if (emojiDiscoverInFlight) return;
+    emojiDiscoverInFlight = true;
+    emojiDiscoverDetailSet = null;
+    renderEmojiDiscoverLoading(list);
+    if (status) status.textContent = 'Loading public emoji sets from relays…';
     try {
         const relays = [...new Set([...(dmRelayUrls?.length ? dmRelayUrls : []), ...RELAY_URLS])];
         const ordered = sortRelaysForRead(relays);
@@ -522,6 +553,8 @@ async function discoverEmojiSets() {
         emojiDiscoverDetailSet = null;
         renderDiscoveredEmojiSets();
         if (status) status.textContent = 'Could not discover emoji sets.';
+    } finally {
+        emojiDiscoverInFlight = false;
     }
 }
 
@@ -930,6 +963,26 @@ function populateSettingsEmojiTileItem(item, token, urlMap) {
     }
 }
 
+function renderSettingsEmojiLoading() {
+    const host = document.getElementById('settingsEmojiPreview');
+    if (!host) return;
+    host.innerHTML = '';
+    const wrap = document.createElement('div');
+    wrap.className = 'settings-emoji-loading';
+    wrap.setAttribute('role', 'status');
+    wrap.setAttribute('aria-busy', 'true');
+    wrap.setAttribute('aria-live', 'polite');
+    const spinner = document.createElement('span');
+    spinner.className = 'settings-emoji-loading-spinner';
+    spinner.setAttribute('aria-hidden', 'true');
+    const msg = document.createElement('p');
+    msg.className = 'settings-emoji-loading-msg';
+    msg.textContent = 'Loading your emoji set from relays…';
+    wrap.appendChild(spinner);
+    wrap.appendChild(msg);
+    host.appendChild(wrap);
+}
+
 function renderSettingsEmojiPreview(emojis) {
     const host = document.getElementById('settingsEmojiPreview');
     if (!host) return;
@@ -1011,6 +1064,8 @@ async function openSettingsModal() {
         }
     });
     syncBodyOverlayLock();
+    renderSettingsEmojiLoading();
+    if (emojiStatus) emojiStatus.textContent = 'Loading your emoji set…';
     await loadOwnCustomReactionSetFromNostr();
     settingsRelayDraft = await fetchKind10050Relays(publicKey);
     if (!settingsRelayDraft.length) {
@@ -1034,9 +1089,10 @@ async function openSettingsModal() {
             : 'No custom set on Nostr. Using default emoji set.';
     }
     if (discoverStatus) {
-        discoverStatus.textContent = 'Click refresh to discover public sets.';
+        discoverStatus.textContent = emojiDiscoverCatalog.length
+            ? `${emojiDiscoverCatalog.length} set(s) cached. Discover relays were already queried this session.`
+            : 'Expand Discover Emoji Sets once to query relays (runs once per app session).';
     }
-    emojiDiscoverCatalog = [];
     emojiDiscoverDetailSet = null;
     const discoverSearch = document.getElementById('settingsEmojiDiscoverSearch');
     if (discoverSearch) discoverSearch.value = '';
@@ -1102,7 +1158,6 @@ function initSettingsUi() {
     const emojiSaveBtn = document.getElementById('settingsEmojiSaveBtn');
     const emojiResetBtn = document.getElementById('settingsEmojiResetBtn');
     const emojiStatus = document.getElementById('settingsEmojiStatus');
-    const emojiDiscoverBtn = document.getElementById('settingsEmojiDiscoverBtn');
     const emojiDiscoverSearch = document.getElementById('settingsEmojiDiscoverSearch');
 
     if (btn) {
@@ -1190,11 +1245,6 @@ function initSettingsUi() {
             emojiResetBtn.disabled = false;
         });
     }
-    if (emojiDiscoverBtn) {
-        emojiDiscoverBtn.addEventListener('click', () => {
-            void discoverEmojiSets();
-        });
-    }
     if (emojiDiscoverSearch) {
         emojiDiscoverSearch.addEventListener('input', () => {
             if (emojiDiscoverSearchDebounce) clearTimeout(emojiDiscoverSearchDebounce);
@@ -1202,6 +1252,15 @@ function initSettingsUi() {
                 emojiDiscoverSearchDebounce = null;
                 renderDiscoveredEmojiSets();
             }, 150);
+        });
+    }
+    const emojiDiscoverSection = document.querySelector('.settings-section--emoji-discover');
+    if (emojiDiscoverSection instanceof HTMLDetailsElement) {
+        emojiDiscoverSection.addEventListener('toggle', () => {
+            if (emojiDiscoverSection.open && !emojiDiscoverQueriedThisModalOpen) {
+                emojiDiscoverQueriedThisModalOpen = true;
+                void discoverEmojiSets();
+            }
         });
     }
     const syncNowBtn = document.getElementById('settingsSyncNowBtn');
@@ -3994,7 +4053,13 @@ document.addEventListener('DOMContentLoaded', function() {
         // Auto-resize textarea
         messageInput.addEventListener('input', function() {
             this.style.height = 'auto';
-            this.style.height = Math.min(this.scrollHeight, 150) + 'px';
+            const cs = window.getComputedStyle(this);
+            const lineHeight = parseFloat(cs.lineHeight) || 20;
+            const padTop = parseFloat(cs.paddingTop) || 0;
+            const padBottom = parseFloat(cs.paddingBottom) || 0;
+            const maxLines = isMobileLayout() ? 6 : 2;
+            const maxHeight = lineHeight * maxLines + padTop + padBottom;
+            this.style.height = Math.min(this.scrollHeight, maxHeight) + 'px';
         });
 
         // Send on Enter

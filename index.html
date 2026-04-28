@@ -175,10 +175,12 @@
             </details>
             <details class="settings-section settings-section--emoji" open>
                 <summary class="settings-section-summary">
-                    <span class="settings-section-title">Reaction Emoji Set</span>
+                    <span class="settings-section-heading">
+                        <span class="settings-section-title">My Emojis</span>
+                        <span class="settings-info-tip" tabindex="0" role="note" aria-label="Info: Quick picker uses the first 5 reactions. Use x on a tile to remove before saving." data-tip="Quick picker uses the first 5 reactions. Use × on a tile to remove before saving.">i</span>
+                    </span>
                 </summary>
                 <div class="settings-section-body">
-                    <p class="settings-section-note">Quick picker uses the first 5 reactions. Pick reactions from Discover below, one at a time; use × on a tile to remove before saving.</p>
                     <div class="settings-emoji-preview" id="settingsEmojiPreview"></div>
                     <p class="modal-footnote" id="settingsEmojiStatus" aria-live="polite"></p>
                     <div class="settings-actions settings-actions--split settings-emoji-actions">
@@ -189,13 +191,14 @@
             </details>
             <details class="settings-section settings-section--emoji-discover">
                 <summary class="settings-section-summary">
-                    <span class="settings-section-title">Discover Emoji Sets</span>
+                    <span class="settings-section-heading">
+                        <span class="settings-section-title">Discover Emoji Sets</span>
+                        <span class="settings-info-tip" tabindex="0" role="note" aria-label="Info: Discovery queries relays once per app session on first expand." data-tip="The first expand in this app session queries relays for kind 30030 sets. Reopen/expand later reuses cached results until reload.">i</span>
+                    </span>
                 </summary>
                 <div class="settings-section-body">
-                    <p class="settings-section-note">Refresh loads kind 30030 sets from relays (paged backward). Open a set to add reactions one at a time; search narrows the list.</p>
                     <div class="settings-emoji-discover-toolbar">
                         <input type="search" class="modal-search settings-emoji-discover-search" id="settingsEmojiDiscoverSearch" placeholder="Filter by name, d tag, npub, or hex…" autocomplete="off" spellcheck="false" />
-                        <button type="button" class="settings-add-btn" id="settingsEmojiDiscoverBtn">Refresh</button>
                     </div>
                     <div class="settings-relay-list settings-emoji-discover-list" id="settingsEmojiDiscoverList"></div>
                     <p class="modal-footnote" id="settingsEmojiDiscoverStatus" aria-live="polite"></p>
