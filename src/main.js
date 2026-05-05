@@ -1709,7 +1709,16 @@ async function connectWithExtension() {
                 console.warn('Destroying previous relay pool:', e);
             }
         }
+        // Restore the cursor from the last session so incremental sync can pick up where
+        // we left off instead of always falling back to "last 24 hours".
         lastInboxGiftWrapProcessedSec = 0;
+        try {
+            const stored = localStorage.getItem(`bullishchat:syncCursor:${publicKey}`);
+            if (stored) {
+                const parsed = parseInt(stored, 10);
+                if (parsed > 0) lastInboxGiftWrapProcessedSec = parsed;
+            }
+        } catch (_) { /* private-mode or storage unavailable — non-fatal */ }
         pool = new SimplePool();
         
         // Bootstrap against defaults so we can discover our kind 10050 relay list.
@@ -2055,10 +2064,18 @@ function kickStalePendingReactions() {
     }
 }
 
+function syncCursorStorageKey() {
+    return publicKey ? `bullishchat:syncCursor:${publicKey}` : null;
+}
+
 function noteInboxGiftWrapProcessed(createdAt) {
     const t = typeof createdAt === 'number' && createdAt > 0 ? createdAt : 0;
     if (t > lastInboxGiftWrapProcessedSec) {
         lastInboxGiftWrapProcessedSec = t;
+        try {
+            const key = syncCursorStorageKey();
+            if (key) localStorage.setItem(key, String(t));
+        } catch (_) { /* storage quota or private-mode — non-fatal */ }
     }
 }
 
@@ -2210,7 +2227,21 @@ async function runGapFillForConversation(conversationPubkey) {
     syncTelemetry.gapFillRuns += 1;
 
     const readRelays = getReadRelayUrls();
-    const since = Math.floor(Date.now() / 1000) - CONVERSATION_REPAIR_LOOKBACK_SECS;
+    // Use the oldest pending-reaction first-seen timestamp as the lower bound so we
+    // only scan the window where the missing message could plausibly have been published,
+    // rather than always scanning the full 14-day lookback.
+    let oldestPendingMs = Date.now();
+    for (const [msgId, firstSeenMs] of pendingReactionFirstSeen) {
+        const list = pendingReactionsByMessageId.get(msgId);
+        if (list?.some((r) => normalizePubkey(r.conversationPubkey) === pk)) {
+            oldestPendingMs = Math.min(oldestPendingMs, firstSeenMs);
+        }
+    }
+    // Subtract a generous buffer (1 hour) to account for clock skew and relay propagation delay.
+    const since = Math.max(
+        Math.floor(Date.now() / 1000) - CONVERSATION_REPAIR_LOOKBACK_SECS,
+        Math.floor(oldestPendingMs / 1000) - 3600
+    );
     try {
         await ingestPagedGiftWraps(
             readRelays,
@@ -2953,46 +2984,28 @@ function handleReactionRumor(rumor, conversationPubkey, authorPubkey) {
 }
 
 function subscribeToMessages() {
-    // Subscribe to kind 1059 (gift-wrapped) events tagged with our pubkey
-    // SimplePool.subscribe automatically queries all connected relays
-    // Store the subscription so it stays alive
-    console.log('Setting up subscription for publicKey:', publicKey);
     const readRelays = getReadRelayUrls();
-    console.log('Subscribing to relays:', readRelays);
 
-    let eventCount = 0;
+    // Use the cursor so we only ask relays for events we haven't seen yet.
+    // fetchHistoricalGiftWraps() owns the full history on first load; the subscription
+    // only needs to deliver events from that point forward (with a small overlap buffer).
+    const sinceSec = lastInboxGiftWrapProcessedSec > 0
+        ? lastInboxGiftWrapProcessedSec - INCREMENTAL_INBOX_OVERLAP_SECS
+        : Math.floor(Date.now() / 1000);
 
-    // Create filter for gift-wrapped messages (kind 1059) tagged with our pubkey
-    // Note: pool.subscribe takes a single filter object, not an array
-    // Remove 'since' to get all historical messages, not just recent ones
     const filter = {
         kinds: [1059],
-        '#p': [publicKey]
+        '#p': [publicKey],
+        since: sinceSec
     };
-    console.log('Subscription filter:', JSON.stringify(filter, null, 2));
 
     messageSubscription = pool.subscribe(readRelays, filter, {
         onevent(event) {
-            eventCount++;
-            const isDup = seenGiftWrapEventIds.has(event.id);
-            console.log(`✅ Received gift-wrapped message #${eventCount}${isDup ? ' (duplicate)' : ''}:`, {
-                id: event.id,
-                kind: event.kind,
-                created_at: new Date(event.created_at * 1000).toISOString(),
-                tags: event.tags
-            });
-
             handleGiftWrappedMessage(event).catch((error) => {
                 console.error('Error in handleGiftWrappedMessage (non-blocking):', error);
             });
-        },
-        oneose() {
-            console.log(`📭 EOSE (End of Stored Events) - received ${eventCount} total events, ${seenGiftWrapEventIds.size} unique ids`);
         }
     });
-
-    console.log('✅ Subscription active - listening for messages on', readRelays.length, 'relays');
-    console.log('💡 Querying all historical messages (no time limit)');
 }
 
 function scheduleMobileCatchup(reason = 'unknown') {
@@ -3012,7 +3025,10 @@ function scheduleMobileCatchup(reason = 'unknown') {
         }
         messageSubscription = null;
         subscribeToMessages();
-        void fetchHistoricalGiftWraps();
+        // Incremental sync uses the cursor (lastInboxGiftWrapProcessedSec) to fetch only
+        // what was missed while the app was backgrounded — much cheaper than a full history
+        // re-fetch on every resume.
+        void runIncrementalInboxSync();
     }, 350);
 }
 
@@ -3022,13 +3038,9 @@ async function handleGiftWrappedMessage(giftWrap, options = {}) {
         return;
     }
     seenGiftWrapEventIds.add(giftWrap.id);
-
-    console.log('Processing gift-wrapped message:', {
-        id: giftWrap.id,
-        kind: giftWrap.kind,
-        pubkey: giftWrap.pubkey,
-        tags: giftWrap.tags
-    });
+    // Advance the cursor unconditionally so events that fail decryption (e.g. valid gift
+    // wraps not addressed to us) don't stall the incremental sync's since-window.
+    noteInboxGiftWrapProcessed(giftWrap.created_at);
 
     try {
         // Step 1: Unwrap the gift wrap (kind 1059) using NIP-44
@@ -3039,14 +3051,12 @@ async function handleGiftWrappedMessage(giftWrap, options = {}) {
             return;
         }
         
-        console.log('Decrypting gift wrap with ephemeral pubkey:', giftWrap.pubkey);
         let unwrappedJSON;
         try {
             unwrappedJSON = await window.nostr.nip44.decrypt(
                 giftWrap.pubkey,
                 giftWrap.content
             );
-            console.log('Successfully decrypted gift wrap');
         } catch (decryptError) {
             // If decryption fails, this might be a message not intended for us
             // or encrypted with a different key/version. Skip it silently.
@@ -3060,8 +3070,7 @@ async function handleGiftWrappedMessage(giftWrap, options = {}) {
         }
         
         const seal = JSON.parse(unwrappedJSON);
-        console.log('Unwrapped seal:', { kind: seal.kind, pubkey: seal.pubkey });
-        
+
         // Step 2: Verify it's a seal (kind 13)
         if (seal.kind !== 13) {
             console.error('Expected kind 13 seal, got:', seal.kind);
@@ -3088,11 +3097,9 @@ async function handleGiftWrappedMessage(giftWrap, options = {}) {
             sealDecryptPeer = normalizePubkey(sealPTag[1]);
         }
 
-        console.log('Decrypting seal; nip44 peer:', sealDecryptPeer);
         let rumorJSON;
         try {
             rumorJSON = await window.nostr.nip44.decrypt(sealDecryptPeer, seal.content);
-            console.log('Successfully decrypted seal');
         } catch (decryptError) {
             // If seal decryption fails, skip this message
             syncTelemetry.sealDecryptFail += 1;
@@ -3106,10 +3113,9 @@ async function handleGiftWrappedMessage(giftWrap, options = {}) {
         }
         
         const rumor = JSON.parse(rumorJSON);
-        console.log('Unwrapped rumor:', { kind: rumor.kind, pubkey: rumor.pubkey, content: rumor.content?.substring(0, 50) });
 
-        try {
-            // Step 4: NIP-17 — kind 14 DMs, kind 7 reactions, kind 15 file messages (see nips/17.md).
+        // Step 4: NIP-17 — kind 14 DMs, kind 7 reactions, kind 15 file messages (see nips/17.md).
+        {
             if (rumor.kind !== 14 && rumor.kind !== 7 && rumor.kind !== 15) {
                 syncTelemetry.rumorUnsupported += 1;
                 console.warn('Unsupported rumor kind inside gift wrap (skipping):', rumor.kind);
@@ -3203,8 +3209,6 @@ async function handleGiftWrappedMessage(giftWrap, options = {}) {
                     });
                 }
             }
-        } finally {
-            noteInboxGiftWrapProcessed(giftWrap.created_at);
         }
 
     } catch (error) {
