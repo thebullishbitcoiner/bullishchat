@@ -2331,6 +2331,13 @@ async function fetchHistoricalGiftWraps(options = {}) {
     const maxWaitBase = manual ? 35000 : 20000;
     let until;
 
+    // On returning sessions the cursor is already populated from localStorage.
+    // Add a `since` so we only fetch events the app hasn't processed yet —
+    // avoids re-decrypting every historical message on every page load.
+    const sinceSec = (!manual && lastInboxGiftWrapProcessedSec > 0)
+        ? lastInboxGiftWrapProcessedSec - INCREMENTAL_INBOX_OVERLAP_SECS
+        : undefined;
+
     try {
         for (let page = 0; page < maxPages; page++) {
             const filter = {
@@ -2340,6 +2347,9 @@ async function fetchHistoricalGiftWraps(options = {}) {
             };
             if (until !== undefined) {
                 filter.until = until;
+            }
+            if (sinceSec !== undefined) {
+                filter.since = sinceSec;
             }
 
             let baseMw = Math.min(
