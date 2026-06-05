@@ -71,7 +71,10 @@ const REPAIR_MAX_PAGES_DEFAULT = 8;
 const REPAIR_MAX_PAGES_DEEP = 14;
 const REPAIR_PAGE_LIMIT_DEEP = 1500;
 const INCREMENTAL_INBOX_INTERVAL_MS = 45_000;
-const INCREMENTAL_INBOX_OVERLAP_SECS = 5 * 60;
+/** NIP-59 randomizes gift-wrap created_at up to 2 days into the past.
+ *  Amethyst uses 2 days; Gossip uses 7 days. Use 2 days so backdated
+ *  wraps are never below our since cursor. */
+const INCREMENTAL_INBOX_OVERLAP_SECS = 2 * 24 * 60 * 60;
 const INCREMENTAL_INBOX_PAGE_LIMIT = 400;
 const INCREMENTAL_INBOX_MAX_PAGES = 2;
 const GAP_FILL_DEBOUNCE_MS = 450;
@@ -155,6 +158,175 @@ let emojiDiscoverQueriedThisModalOpen = false;
 let emojiDiscoverSearchDebounce = null;
 let settingsEmojiDraftSet = [];
 let mobileCatchupTimer = null;
+
+// === IndexedDB persistence — avoids full cold re-decrypt on every page load ===
+const IDB_NAME = 'bullishchat';
+const IDB_VERSION = 1;
+let db = null;
+/** NIP-59 backdating means we need at least a 2-day overlap on startup to avoid missing
+ *  messages whose created_at was randomised below the stored cursor. */
+const STARTUP_HISTORY_OVERLAP_SECS = 2 * 24 * 60 * 60;
+
+/** Relay-list indexers used for NIP-17/NIP-65 discovery when kind 10050 is not on default relays. */
+const DISCOVERY_RELAYS = ['wss://purplepag.es'];
+
+async function initDB() {
+    try {
+        db = await new Promise((resolve, reject) => {
+            const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+            req.onupgradeneeded = (e) => {
+                const d = e.target.result;
+                if (!d.objectStoreNames.contains('messages')) {
+                    const ms = d.createObjectStore('messages', { keyPath: 'id' });
+                    ms.createIndex('by-conv', 'conversationPubkey');
+                }
+                if (!d.objectStoreNames.contains('profiles')) {
+                    d.createObjectStore('profiles', { keyPath: 'pubkey' });
+                }
+                if (!d.objectStoreNames.contains('seenWraps')) {
+                    d.createObjectStore('seenWraps', { keyPath: 'id' });
+                }
+                if (!d.objectStoreNames.contains('meta')) {
+                    d.createObjectStore('meta', { keyPath: 'key' });
+                }
+            };
+            req.onsuccess = (e) => resolve(e.target.result);
+            req.onerror = (e) => reject(e.target.error);
+        });
+    } catch (e) {
+        console.warn('IndexedDB unavailable, running in-memory only:', e);
+        db = null;
+    }
+}
+
+function idbGet(store, key) {
+    if (!db) return Promise.resolve(undefined);
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(store, 'readonly');
+        const req = tx.objectStore(store).get(key);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+    });
+}
+
+function idbPut(store, value) {
+    if (!db) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(store, 'readwrite');
+        const req = tx.objectStore(store).put(value);
+        req.onsuccess = () => resolve();
+        req.onerror = () => reject(req.error);
+    });
+}
+
+function idbGetAll(store) {
+    if (!db) return Promise.resolve([]);
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(store, 'readonly');
+        const req = tx.objectStore(store).getAll();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => reject(req.error);
+    });
+}
+
+function idbClearAll() {
+    if (!db) return Promise.resolve();
+    return new Promise((resolve) => {
+        const stores = ['messages', 'profiles', 'seenWraps', 'meta'];
+        const tx = db.transaction(stores, 'readwrite');
+        for (const s of stores) tx.objectStore(s).clear();
+        tx.oncomplete = resolve;
+        tx.onerror = resolve;
+    });
+}
+
+async function loadStateFromDB(ownerPubkey) {
+    if (!db) return;
+    try {
+        const stored = await idbGet('meta', 'ownerPubkey');
+        if (stored && stored.value !== ownerPubkey) {
+            console.info('DB: different pubkey detected — clearing stored state.');
+            await idbClearAll();
+        }
+        await idbPut('meta', { key: 'ownerPubkey', value: ownerPubkey });
+
+        const [wrapRows, msgRows, profileRows, cursorRow, dmRelayRow] = await Promise.all([
+            idbGetAll('seenWraps'),
+            idbGetAll('messages'),
+            idbGetAll('profiles'),
+            idbGet('meta', 'lastInboxGiftWrapProcessedSec'),
+            idbGet('meta', 'dmRelayUrls'),
+        ]);
+
+        for (const { id } of wrapRows) {
+            seenGiftWrapEventIds.add(id);
+        }
+
+        for (const msg of msgRows) {
+            const { conversationPubkey: pk, ...msgData } = msg;
+            if (!pk) continue;
+            if (!conversations[pk]) conversations[pk] = [];
+            conversations[pk].push(msgData);
+            if (msg.id) seenRumorIds.add(msg.id);
+        }
+        for (const pk of Object.keys(conversations)) {
+            conversations[pk].sort((a, b) => a.timestamp - b.timestamp);
+        }
+
+        for (const p of profileRows) {
+            const { pubkey, ...fields } = p;
+            userProfiles[pubkey] = fields;
+        }
+
+        if (cursorRow?.value > 0) {
+            lastInboxGiftWrapProcessedSec = cursorRow.value;
+        }
+
+        // Restore previously-discovered inbox relay list so kind 10050 re-discovery
+        // can bootstrap from the user's own relay rather than only the app defaults.
+        if (Array.isArray(dmRelayRow?.value) && dmRelayRow.value.length > 0) {
+            dmRelayUrls = dmRelayRow.value;
+        }
+
+        console.info(
+            `DB: loaded ${msgRows.length} messages, ${wrapRows.length} seen wraps, ${profileRows.length} profiles; cursor=${lastInboxGiftWrapProcessedSec}; dmRelays=${dmRelayUrls.join(',')}`
+        );
+    } catch (e) {
+        console.warn('Failed to load state from IndexedDB:', e);
+    }
+}
+
+function dbSaveMessage(conversationPubkey, message) {
+    if (!db || !message?.id) return;
+    void idbPut('messages', { ...message, conversationPubkey }).catch((e) =>
+        console.warn('DB: save message failed:', e)
+    );
+}
+
+function dbSaveProfile(pubkey, profile) {
+    if (!db || !pubkey || !profile) return;
+    void idbPut('profiles', { pubkey, ...profile }).catch((e) =>
+        console.warn('DB: save profile failed:', e)
+    );
+}
+
+function dbMarkWrapSeen(id) {
+    if (!db || !id) return;
+    void idbPut('seenWraps', { id }).catch((e) => console.warn('DB: mark wrap failed:', e));
+}
+
+function dbSaveLastTimestamp(ts) {
+    if (!db || !(ts > 0)) return;
+    void idbPut('meta', { key: 'lastInboxGiftWrapProcessedSec', value: ts }).catch((e) =>
+        console.warn('DB: save cursor failed:', e)
+    );
+}
+
+// === NIP-42 AUTH — sign relay auth challenges with the connected extension ===
+async function nostrAuthHandler(authEventTemplate) {
+    if (!window.nostr?.signEvent) throw new Error('NIP-07 signer not available for relay AUTH');
+    return window.nostr.signEvent(authEventTemplate);
+}
 
 function splitGraphemes(str) {
     if (!str) return [];
@@ -505,7 +677,7 @@ async function discoverEmojiSets() {
             const filter = { kinds: [CUSTOM_REACTION_SET_KIND], limit: EMOJI_DISCOVERY_PAGE_LIMIT };
             if (until !== undefined) filter.until = until;
             const maxWait = Math.min(65000, 12000 + ordered.length * 2000);
-            const events = await pool.querySync(ordered, filter, { maxWait });
+            const events = await pool.querySync(ordered, filter, { maxWait, onauth: nostrAuthHandler });
             const n = Array.isArray(events) ? events.length : 0;
             if (!n) break;
             for (const ev of events) {
@@ -573,7 +745,7 @@ async function loadOwnCustomReactionSetFromNostr() {
                 '#d': [CUSTOM_REACTION_SET_D_TAG],
                 limit: 5
             },
-            { maxWait: 9000 }
+            { maxWait: 9000, onauth: nostrAuthHandler }
         );
         const newest = (events || []).sort((a, b) => (b.created_at || 0) - (a.created_at || 0))[0];
         const parsedSet = parseCustomReactionSetMeta(newest);
@@ -617,7 +789,7 @@ async function saveOwnCustomReactionSetToNostr(list) {
     const signed = await window.nostr.signEvent(ev);
     const targets = [...new Set([...(dmRelayUrls?.length ? dmRelayUrls : []), ...RELAY_URLS])];
     const publishAttempts = targets.map(async (url) => {
-        await pool.publish([url], signed);
+        await pool.publish([url], signed, { onauth: nostrAuthHandler });
         return url;
     });
     await Promise.any(publishAttempts);
@@ -1133,11 +1305,12 @@ async function saveSettingsRelays() {
         const signed = await window.nostr.signEvent(ev);
         const targets = [...new Set([...dmRelayUrls, ...RELAY_URLS, ...settingsRelayDraft])];
         const publishAttempts = targets.map(async (url) => {
-            await pool.publish([url], signed);
+            await pool.publish([url], signed, { onauth: nostrAuthHandler });
             return url;
         });
         await Promise.any(publishAttempts);
         dmRelayUrls = [...new Set(settingsRelayDraft)];
+        void idbPut('meta', { key: 'dmRelayUrls', value: dmRelayUrls }).catch(() => {});
         if (status) status.textContent = `Saved ${settingsRelayDraft.length} relay(s).`;
     } catch (err) {
         if (status) status.textContent = 'Could not publish settings. Try again.';
@@ -1710,13 +1883,24 @@ async function connectWithExtension() {
             }
         }
         lastInboxGiftWrapProcessedSec = 0;
-        pool = new SimplePool();
-        
-        // Bootstrap against defaults so we can discover our kind 10050 relay list.
+        // enableReconnect: pool automatically re-establishes dropped WebSocket connections
+        // and re-sends active subscriptions, covering desktop WiFi drops without manual catchup.
+        pool = new SimplePool({ enableReconnect: true });
+
+        // Bootstrap against defaults + relay-list indexers to discover our kind 10050.
         document.getElementById('statusText').textContent = 'Connecting to relays...';
         const bootstrapResults = await connectRelaySet(RELAY_URLS);
-        const ownInboxRelays = await fetchKind10050Relays(publicKey);
+
+        // Full three-tier resolution: kind 10050 on current set → discovery relays → NIP-65 fallback.
+        let ownInboxRelays = await resolveInboxRelays(publicKey);
+        if (!ownInboxRelays.length) {
+            console.warn('Inbox relays not found via kind 10050 or NIP-65 — using default relays. ' +
+                'Go to Settings → DM Relays to configure your inbox relays.');
+        }
+
         dmRelayUrls = ownInboxRelays.length ? [...new Set(ownInboxRelays)] : [...RELAY_URLS];
+        // Persist so the next session can bootstrap kind 10050 discovery from the user's own relay.
+        void idbPut('meta', { key: 'dmRelayUrls', value: dmRelayUrls }).catch(() => {});
         const additionalRelayUrls = dmRelayUrls.filter((url) => !RELAY_URLS.includes(url));
         const additionalResults = additionalRelayUrls.length ? await connectRelaySet(additionalRelayUrls) : [];
         const relayResults = [...bootstrapResults, ...additionalResults];
@@ -1743,9 +1927,15 @@ async function connectWithExtension() {
         }
         const chatAreaEl = document.getElementById('chatArea');
         if (chatAreaEl) chatAreaEl.removeAttribute('hidden');
-        setInboxLoading(true);
 
         setRelayStatusTooltip(bootstrapResults, inboxRelayStatuses);
+
+        // Load persisted state from IndexedDB before showing conversations — instant display
+        // for returning users without waiting for relay queries to complete.
+        await loadStateFromDB(publicKey);
+        updateConversationsList();
+
+        setInboxLoading(true);
         await loadOwnCustomReactionSetFromNostr();
 
         // Live subscription first so new mail arrives while history is still decrypting.
@@ -1755,6 +1945,7 @@ async function connectWithExtension() {
         updateSettingsSyncUiState();
         void fetchHistoricalGiftWraps().finally(() => {
             setInboxLoading(false);
+            prefetchMissingConversationProfiles();
         });
 
     } catch (error) {
@@ -1842,44 +2033,24 @@ async function enrichDiscoverEmojiSetAuthors(pubkeys) {
 
 async function fetchUserProfileFromRelays(pubkey) {
     try {
-        // Subscribe to kind 0 events for this user
-        // Note: pool.subscribe takes a single filter object, not an array
-        return await new Promise((resolve) => {
-            const sub = pool.subscribe(RELAY_URLS, {
-                kinds: [0],
-                authors: [pubkey],
-                limit: 1
-            }, {
-                onevent(event) {
-                    try {
-                        const profile = JSON.parse(event.content);
-                        userProfiles[pubkey] = normalizeProfileMetadata(profile);
-                        sub.close();
-                        resolve(userProfiles[pubkey]);
-                    } catch (err) {
-                        console.error('Failed to parse profile', err);
-                    }
-                },
-                oneose() {
-                    if (!userProfiles[pubkey]) {
-                        userProfiles[pubkey] = emptyUserProfile();
-                    }
-                    resolve(userProfiles[pubkey]);
-                }
-            });
-
-            // Timeout after 3 seconds
-            setTimeout(() => {
-                if (!userProfiles[pubkey]) {
-                    userProfiles[pubkey] = emptyUserProfile();
-                    sub.close();
-                    resolve(userProfiles[pubkey]);
-                }
-            }, 3000);
-        });
+        const events = await pool.querySync(
+            getReadRelayUrlsUnsorted(),
+            { kinds: [0], authors: [pubkey], limit: 1 },
+            { maxWait: 6000, onauth: nostrAuthHandler }
+        );
+        const best = (events || []).sort((a, b) => (b.created_at || 0) - (a.created_at || 0))[0];
+        if (best) {
+            const profile = normalizeProfileMetadata(JSON.parse(best.content));
+            userProfiles[pubkey] = profile;
+            dbSaveProfile(pubkey, profile);
+            return profile;
+        }
+        if (!userProfiles[pubkey]) userProfiles[pubkey] = emptyUserProfile();
+        return userProfiles[pubkey];
     } catch (error) {
         console.error('Relay profile fetch failed for', pubkey, error);
-        return null;
+        if (!userProfiles[pubkey]) userProfiles[pubkey] = emptyUserProfile();
+        return userProfiles[pubkey];
     }
 }
 
@@ -1899,6 +2070,7 @@ async function fetchUserProfile(pubkey) {
             const profile = map.get(pk);
             if (profile) {
                 userProfiles[pk] = profile;
+                dbSaveProfile(pk, profile);
                 return profile;
             }
         } catch (error) {
@@ -1946,7 +2118,7 @@ async function fetchKind10050Relays(authorPubkey, options = {}) {
         const events = await pool.querySync(
             queryRelays,
             { kinds: [10050], authors: [authorPubkey], limit: 8 },
-            { maxWait: options.maxWait ?? 9000 }
+            { maxWait: options.maxWait ?? 9000, onauth: nostrAuthHandler }
         );
         const ev = (events || []).sort((a, b) => (b.created_at || 0) - (a.created_at || 0))[0];
         if (!ev?.tags?.length) return [];
@@ -1955,6 +2127,61 @@ async function fetchKind10050Relays(authorPubkey, options = {}) {
         console.warn('fetchKind10050Relays failed:', e);
         return [];
     }
+}
+
+/**
+ * NIP-65 (kind 10002) inbox relays for a pubkey — used as a fallback when kind 10050
+ * is not found. Coracle/Welshman and Amethyst both merge NIP-65 inbox relays with
+ * kind 10050 when resolving where to publish DMs.
+ */
+async function fetchNip65InboxRelays(authorPubkey, queryRelays) {
+    try {
+        const relays = queryRelays?.length
+            ? [...new Set(queryRelays)]
+            : [...new Set([...(dmRelayUrls?.length ? dmRelayUrls : []), ...RELAY_URLS, ...DISCOVERY_RELAYS])];
+        const events = await pool.querySync(
+            relays,
+            { kinds: [10002], authors: [authorPubkey], limit: 3 },
+            { maxWait: 7000, onauth: nostrAuthHandler }
+        );
+        const ev = (events || []).sort((a, b) => (b.created_at || 0) - (a.created_at || 0))[0];
+        if (!ev?.tags?.length) return [];
+        // ['r', url] = both read+write; ['r', url, 'read'] = inbox only; ['r', url, 'write'] = skip
+        return ev.tags
+            .filter((t) => t[0] === 'r' && typeof t[1] === 'string' && t[1].length && t[2] !== 'write')
+            .map((t) => t[1]);
+    } catch (e) {
+        console.warn('fetchNip65InboxRelays failed:', e);
+        return [];
+    }
+}
+
+/**
+ * Resolve inbox relays for a pubkey with a three-tier fallback chain used by all
+ * major NIP-17 clients (Amethyst, Coracle, 0xchat):
+ *   1. kind 10050 on current relay set
+ *   2. kind 10050 on relay-list indexers (purplepag.es, relay.nostr.band)
+ *   3. kind 10002 NIP-65 inbox relays as last resort
+ */
+async function resolveInboxRelays(authorPubkey) {
+    // 1. Try kind 10050 on current relay set
+    let relays = await fetchKind10050Relays(authorPubkey);
+    if (relays.length) return relays;
+
+    // 2. Try kind 10050 on relay-list indexers
+    const discoverySet = [...new Set([...DISCOVERY_RELAYS, ...RELAY_URLS])];
+    relays = await fetchKind10050Relays(authorPubkey, { relays: discoverySet, maxWait: 8000 });
+    if (relays.length) {
+        console.info(`resolveInboxRelays: found kind 10050 via discovery relays for ${authorPubkey.slice(0, 8)}`);
+        return relays;
+    }
+
+    // 3. Fall back to NIP-65 (kind 10002) inbox relays
+    relays = await fetchNip65InboxRelays(authorPubkey, discoverySet);
+    if (relays.length) {
+        console.info(`resolveInboxRelays: using NIP-65 inbox relays as fallback for ${authorPubkey.slice(0, 8)}`);
+    }
+    return relays;
 }
 
 /** Read from both default + discovered inbox relays to reduce missed events on flaky/mobile sockets. */
@@ -2059,6 +2286,7 @@ function noteInboxGiftWrapProcessed(createdAt) {
     const t = typeof createdAt === 'number' && createdAt > 0 ? createdAt : 0;
     if (t > lastInboxGiftWrapProcessedSec) {
         lastInboxGiftWrapProcessedSec = t;
+        dbSaveLastTimestamp(t);
     }
 }
 
@@ -2082,13 +2310,16 @@ async function ingestPagedGiftWraps(readRelays, buildFilter, opts) {
             syncTelemetry.querySyncCalls += 1;
             const t0 = Date.now();
             try {
-                events = await pool.querySync(ordered, filter, { maxWait });
+                events = await pool.querySync(ordered, filter, { maxWait, onauth: nostrAuthHandler });
                 syncTelemetry.querySyncMsTotal += Date.now() - t0;
                 break;
             } catch (qe) {
                 syncTelemetry.querySyncErrors += 1;
                 if (attempt === 1) {
-                    console.warn('ingestPagedGiftWraps querySync failed after retry:', qe);
+                    console.warn(
+                        'ingestPagedGiftWraps: page query failed after 2 attempts — some messages may be missing. Check relay connectivity.',
+                        qe
+                    );
                     events = [];
                 }
             }
@@ -2300,6 +2531,14 @@ async function fetchHistoricalGiftWraps(options = {}) {
     const maxWaitBase = manual ? 35000 : 20000;
     let until;
 
+    // On startup with a persisted cursor: only fetch events since the last session
+    // (plus a 1-day overlap to catch delayed relay delivery). Manual sync always
+    // fetches the full history to repair any gaps.
+    const sinceCursor =
+        !manual && lastInboxGiftWrapProcessedSec > 0
+            ? lastInboxGiftWrapProcessedSec - STARTUP_HISTORY_OVERLAP_SECS
+            : undefined;
+
     try {
         for (let page = 0; page < maxPages; page++) {
             const filter = {
@@ -2307,6 +2546,9 @@ async function fetchHistoricalGiftWraps(options = {}) {
                 '#p': [publicKey],
                 limit: pageLimit
             };
+            if (sinceCursor !== undefined) {
+                filter.since = sinceCursor;
+            }
             if (until !== undefined) {
                 filter.until = until;
             }
@@ -2321,7 +2563,7 @@ async function fetchHistoricalGiftWraps(options = {}) {
                 syncTelemetry.querySyncCalls += 1;
                 const t0 = Date.now();
                 try {
-                    events = await pool.querySync(readRelays, filter, { maxWait });
+                    events = await pool.querySync(readRelays, filter, { maxWait, onauth: nostrAuthHandler });
                     syncTelemetry.querySyncMsTotal += Date.now() - t0;
                     break;
                 } catch (qe) {
@@ -2369,6 +2611,12 @@ async function fetchHistoricalGiftWraps(options = {}) {
 /**
  * Repair fetch when opening a thread: paginated kind-1059 backfill so we are not limited to one relay response page.
  * @param {{ deep?: boolean, force?: boolean }} [options] — deep: more pages / larger page size; force: bypass cooldown (manual sync)
+ *
+ * NOTE — inbox-wide filter by design: NIP-17 kind 1059 gift wraps use an ephemeral sender
+ * pubkey, so the only reliable relay filter is `#p: [ourPubkey]` (the whole inbox). There is
+ * no protocol-level way to request only wraps from a specific conversation peer. Each repair
+ * run therefore re-ingests the full inbox window; already-seen wrap IDs are skipped immediately
+ * via seenGiftWrapEventIds / IndexedDB, so the actual decryption cost is bounded to truly new events.
  */
 async function fetchConversationRepair(conversationPubkey, options = {}) {
     if (!pool || !publicKey || !conversationPubkey) {
@@ -2493,6 +2741,7 @@ function prefetchMissingConversationProfiles() {
                     const profile = map.get(normalizePubkey(pubkey));
                     if (profile) {
                         userProfiles[pubkey] = profile;
+                        dbSaveProfile(pubkey, profile);
                     } else {
                         unresolved.push(pubkey);
                     }
@@ -2940,6 +3189,7 @@ function handleReactionRumor(rumor, conversationPubkey, authorPubkey) {
     const targetMessage = conversations[conversationPubkey].find((m) => m.id === targetMessageId);
     if (targetMessage) {
         applyReactionToMessage(targetMessage, emoji, authorPubkey);
+        dbSaveMessage(conversationPubkey, targetMessage);
     } else {
         const pending = pendingReactionsByMessageId.get(targetMessageId) || [];
         pending.push({ conversationPubkey, emoji, fromPubkey: authorPubkey });
@@ -2953,46 +3203,24 @@ function handleReactionRumor(rumor, conversationPubkey, authorPubkey) {
 }
 
 function subscribeToMessages() {
-    // Subscribe to kind 1059 (gift-wrapped) events tagged with our pubkey
-    // SimplePool.subscribe automatically queries all connected relays
-    // Store the subscription so it stays alive
-    console.log('Setting up subscription for publicKey:', publicKey);
     const readRelays = getReadRelayUrls();
-    console.log('Subscribing to relays:', readRelays);
-
-    let eventCount = 0;
-
-    // Create filter for gift-wrapped messages (kind 1059) tagged with our pubkey
-    // Note: pool.subscribe takes a single filter object, not an array
-    // Remove 'since' to get all historical messages, not just recent ones
-    const filter = {
-        kinds: [1059],
-        '#p': [publicKey]
-    };
-    console.log('Subscription filter:', JSON.stringify(filter, null, 2));
+    // `since: now` so this subscription only delivers events that arrive after
+    // this moment — historical backfill is handled by fetchHistoricalGiftWraps /
+    // runIncrementalInboxSync, avoiding redundant re-decryption of stored events.
+    const since = Math.floor(Date.now() / 1000);
+    const filter = { kinds: [1059], '#p': [publicKey], since };
 
     messageSubscription = pool.subscribe(readRelays, filter, {
+        onauth: nostrAuthHandler,
         onevent(event) {
-            eventCount++;
-            const isDup = seenGiftWrapEventIds.has(event.id);
-            console.log(`✅ Received gift-wrapped message #${eventCount}${isDup ? ' (duplicate)' : ''}:`, {
-                id: event.id,
-                kind: event.kind,
-                created_at: new Date(event.created_at * 1000).toISOString(),
-                tags: event.tags
-            });
-
             handleGiftWrappedMessage(event).catch((error) => {
                 console.error('Error in handleGiftWrappedMessage (non-blocking):', error);
             });
         },
         oneose() {
-            console.log(`📭 EOSE (End of Stored Events) - received ${eventCount} total events, ${seenGiftWrapEventIds.size} unique ids`);
+            console.log('Live subscription EOSE — listening for new messages on', readRelays.length, 'relay(s)');
         }
     });
-
-    console.log('✅ Subscription active - listening for messages on', readRelays.length, 'relays');
-    console.log('💡 Querying all historical messages (no time limit)');
 }
 
 function scheduleMobileCatchup(reason = 'unknown') {
@@ -3012,7 +3240,9 @@ function scheduleMobileCatchup(reason = 'unknown') {
         }
         messageSubscription = null;
         subscribeToMessages();
-        void fetchHistoricalGiftWraps();
+        // Use incremental sync (cursor-based) rather than a full historical re-fetch
+        // so mobile foreground events don't re-decrypt thousands of already-seen wraps.
+        void runIncrementalInboxSync();
     }, 350);
 }
 
@@ -3022,6 +3252,7 @@ async function handleGiftWrappedMessage(giftWrap, options = {}) {
         return;
     }
     seenGiftWrapEventIds.add(giftWrap.id);
+    dbMarkWrapSeen(giftWrap.id);
 
     console.log('Processing gift-wrapped message:', {
         id: giftWrap.id,
@@ -3159,13 +3390,14 @@ async function handleGiftWrappedMessage(giftWrap, options = {}) {
                 return;
             }
 
+            let newMsg;
             if (rumor.kind === 15) {
                 const fileMeta = parseKind15FileMeta(rumor);
                 if (!fileMeta) {
                     console.warn('Kind 15 rumor missing file URL; skipping', { id: rumor.id });
                     return;
                 }
-                conversations[conversationPubkey].push({
+                newMsg = {
                     id: rumor.id,
                     kind: 15,
                     content: rumor.content,
@@ -3173,23 +3405,21 @@ async function handleGiftWrappedMessage(giftWrap, options = {}) {
                     timestamp: rumor.created_at,
                     from: authorPubkey,
                     actualTimestamp: giftWrap.created_at
-                });
+                };
             } else {
-                conversations[conversationPubkey].push({
+                newMsg = {
                     id: rumor.id,
                     kind: 14,
                     content: rumor.content,
                     timestamp: rumor.created_at,
                     from: authorPubkey,
                     actualTimestamp: giftWrap.created_at
-                });
+                };
             }
-            applyPendingReactionsForMessage(
-                conversationPubkey,
-                conversations[conversationPubkey][conversations[conversationPubkey].length - 1]
-            );
-
+            conversations[conversationPubkey].push(newMsg);
+            applyPendingReactionsForMessage(conversationPubkey, newMsg);
             conversations[conversationPubkey].sort((a, b) => a.timestamp - b.timestamp);
+            dbSaveMessage(conversationPubkey, newMsg);
 
             if (!options.suppressUi) {
                 updateConversationsList();
@@ -3846,17 +4076,13 @@ function displayMessages(pubkey) {
 }
 
 async function publishRumorAsGiftWrap(rumor, peerPubkey) {
-    let recipientInboxRelays = await fetchKind10050Relays(peerPubkey);
+    // Three-tier resolution matching Amethyst / 0xchat / Coracle:
+    //   1. kind 10050 on current relay set
+    //   2. kind 10050 on relay-list indexers (purplepag.es, relay.nostr.band)
+    //   3. NIP-65 kind 10002 inbox relays as last resort
+    const recipientInboxRelays = await resolveInboxRelays(peerPubkey);
     if (!recipientInboxRelays.length) {
-        // Retry with a wider/ensured probe before declaring recipient not NIP-17 ready.
-        recipientInboxRelays = await fetchKind10050Relays(peerPubkey, {
-            relays: [...new Set([...RELAY_URLS, ...dmRelayUrls])],
-            ensureConnections: true,
-            maxWait: 15000
-        });
-    }
-    if (!recipientInboxRelays.length) {
-        throw new Error('Recipient kind 10050 inbox relays not discoverable right now.');
+        throw new Error('Recipient inbox relays not discoverable via kind 10050 or NIP-65.');
     }
     const publishRelays = [...new Set(recipientInboxRelays)];
     const relayHint = recipientInboxRelays[0] || null;
@@ -3888,12 +4114,26 @@ async function publishRumorAsGiftWrap(rumor, peerPubkey) {
 
     await createAndPublishGiftWrap(sealToWrap, peerPubkey, publishRelays, relayHint, { requireSuccess: true });
 
-    const selfInbox = await fetchKind10050Relays(publicKey);
+    const selfInbox = await resolveInboxRelays(publicKey);
     if (selfInbox.length > 0) {
         const selfPublishRelays = [...new Set(selfInbox)];
         await createAndPublishGiftWrap(sealToWrap, publicKey, selfPublishRelays, selfInbox[0] || null);
     } else {
-        console.warn('Skipping self gift-wrap copy: no kind 10050 inbox relays for sender key.');
+        console.warn('Skipping self gift-wrap copy: no kind 10050 inbox relays configured for your key. ' +
+            'Sent messages will not survive a page reload. Go to Settings → DM Relays to configure your inbox relays.');
+        // Surface a brief status hint so the user knows to act
+        const statusText = document.getElementById('statusText');
+        if (statusText && !statusText.dataset.selfInboxWarned) {
+            statusText.dataset.selfInboxWarned = '1';
+            const original = statusText.textContent;
+            statusText.textContent = 'No inbox relays — sent messages may disappear on reload';
+            statusText.style.color = 'var(--color-warning, #c8a000)';
+            setTimeout(() => {
+                statusText.textContent = original;
+                statusText.style.color = '';
+                delete statusText.dataset.selfInboxWarned;
+            }, 8000);
+        }
     }
 }
 
@@ -4012,7 +4252,7 @@ async function createAndPublishGiftWrap(seal, recipientPubkey, publishRelays, re
         const targets = publishRelays?.length ? publishRelays : RELAY_URLS;
         const publishPromises = targets.map(async (url) => {
             try {
-                await pool.publish([url], signedGiftWrap);
+                await pool.publish([url], signedGiftWrap, { onauth: nostrAuthHandler });
                 return { success: true, url };
             } catch (err) {
                 console.warn(`Failed to publish to ${url}:`, err);
@@ -4035,8 +4275,31 @@ async function createAndPublishGiftWrap(seal, recipientPubkey, publishRelays, re
 window.connectWithExtension = connectWithExtension;
 window.sendMessage = sendMessage;
 
+// Diagnostic helper — run __bullishDiag() in the browser console to inspect sync state
+window.__bullishDiag = () => {
+    const convSummary = {};
+    for (const [pk, msgs] of Object.entries(conversations)) {
+        convSummary[pk.slice(0, 8)] = msgs.length;
+    }
+    return {
+        conversationCount: Object.keys(conversations).length,
+        conversations: convSummary,
+        seenWrapCount: seenGiftWrapEventIds.size,
+        seenRumorCount: seenRumorIds.size,
+        cursor: lastInboxGiftWrapProcessedSec,
+        cursorDate: lastInboxGiftWrapProcessedSec > 0
+            ? new Date(lastInboxGiftWrapProcessedSec * 1000).toISOString()
+            : 'none',
+        dbAvailable: !!db,
+        dmRelays: [...dmRelayUrls],
+        telemetry: { ...syncTelemetry },
+    };
+};
+
 // Initialize DOM event listeners when DOM is ready
 document.addEventListener('DOMContentLoaded', function() {
+    void initDB();
+
     const versionEl = document.getElementById('appVersion');
     if (versionEl) {
         versionEl.textContent = 'v' + pkg.version;
