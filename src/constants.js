@@ -51,7 +51,10 @@ export const NOSTR_ARCHIVES_PROFILES_METADATA_URL = 'https://api.nostrarchives.c
 export const PROFILE_METADATA_BATCH_SIZE = 100;
 
 export const IDB_NAME = 'bullishchat';
-export const IDB_VERSION = 1;
+export const IDB_VERSION = 3;
+
+export const NIP04_INCREMENTAL_INTERVAL_MS = 45_000;
+export const NIP04_HISTORY_LOOKBACK_SECS = 90 * 24 * 60 * 60;
 
 /** NIP-59 backdating means we need at least a 2-day overlap on startup to avoid missing
  *  messages whose created_at was randomised below the stored cursor. */

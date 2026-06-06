@@ -63,6 +63,16 @@ export const state = {
     emojiDiscoverSearchDebounce: null,
     settingsEmojiDraftSet: [],
     mobileCatchupTimer: null,
+    /** NIP-04 (kind 4) conversations, keyed by peer pubkey — separate from NIP-17 */
+    nip04Conversations: {},
+    seenKind4EventIds: new Set(),
+    lastKind4ProcessedSec: 0,
+    /** Stable DOM rows for NIP-04 conversation list (avoids avatar remount flicker) */
+    nip04ConversationItemEls: new Map(),
+    kind4Subscription: null,
+    /** 'nip17' | 'nip04' | null — drives send path and which message store renders */
+    currentChatProtocol: null,
+    incrementalNip04TimerId: null,
     db: null,
     profileSearchAbort: null,
     profileSearchDebounceTimer: null,

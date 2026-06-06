@@ -477,6 +477,28 @@ body.is-authenticated .conversations-list {
     border-left: 3px solid var(--accent);
 }
 
+.protocol-divider {
+    font-size: 0.65rem;
+    color: var(--muted, #666);
+    text-align: center;
+    padding: 6px 12px 4px;
+    border-top: 1px solid var(--border, #2a2a2a);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    user-select: none;
+}
+
+.nip04-banner {
+    font-size: 0.72rem;
+    color: #a07020;
+    background: #2a1e00;
+    border: 1px solid #4a3800;
+    border-radius: 6px;
+    padding: 6px 10px;
+    margin: 8px 12px 4px;
+    text-align: center;
+}
+
 .conversation-pubkey {
     font-size: 13px;
     font-weight: 500;

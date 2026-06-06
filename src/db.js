@@ -20,6 +20,13 @@ export async function initDB() {
                 if (!d.objectStoreNames.contains('meta')) {
                     d.createObjectStore('meta', { keyPath: 'key' });
                 }
+                if (!d.objectStoreNames.contains('nip04Messages')) {
+                    const n4 = d.createObjectStore('nip04Messages', { keyPath: 'id' });
+                    n4.createIndex('by-conv', 'conversationPubkey');
+                }
+                if (!d.objectStoreNames.contains('seenKind4')) {
+                    d.createObjectStore('seenKind4', { keyPath: 'id' });
+                }
             };
             req.onsuccess = (e) => resolve(e.target.result);
             req.onerror = (e) => reject(e.target.error);
@@ -63,7 +70,7 @@ export function idbGetAll(store) {
 export function idbClearAll() {
     if (!state.db) return Promise.resolve();
     return new Promise((resolve) => {
-        const stores = ['messages', 'profiles', 'seenWraps', 'meta'];
+        const stores = ['messages', 'profiles', 'seenWraps', 'meta', 'nip04Messages', 'seenKind4'];
         const tx = state.db.transaction(stores, 'readwrite');
         for (const s of stores) tx.objectStore(s).clear();
         tx.oncomplete = resolve;
@@ -151,4 +158,58 @@ export function dbSaveLastTimestamp(ts) {
     void idbPut('meta', { key: 'lastInboxGiftWrapProcessedSec', value: ts }).catch((e) =>
         console.warn('DB: save cursor failed:', e)
     );
+}
+
+export function dbSaveNip04Message(conversationPubkey, message) {
+    if (!state.db || !message?.id) return;
+    void idbPut('nip04Messages', { ...message, conversationPubkey }).catch((e) =>
+        console.warn('DB: save nip04 message failed:', e)
+    );
+}
+
+export function dbMarkKind4Seen(id) {
+    if (!state.db || !id) return;
+    void idbPut('seenKind4', { id }).catch((e) => console.warn('DB: mark kind4 failed:', e));
+}
+
+export function dbSaveNip04Cursor(ts) {
+    if (!state.db || !(ts > 0)) return;
+    void idbPut('meta', { key: 'lastKind4ProcessedSec', value: ts }).catch((e) =>
+        console.warn('DB: save nip04 cursor failed:', e)
+    );
+}
+
+export async function loadNip04StateFromDB() {
+    if (!state.db) return;
+    try {
+        const [seenRows, msgRows, cursorRow] = await Promise.all([
+            idbGetAll('seenKind4'),
+            idbGetAll('nip04Messages'),
+            idbGet('meta', 'lastKind4ProcessedSec'),
+        ]);
+
+        for (const { id } of seenRows) {
+            state.seenKind4EventIds.add(id);
+        }
+
+        for (const msg of msgRows) {
+            const { conversationPubkey: pk, ...msgData } = msg;
+            if (!pk) continue;
+            if (!state.nip04Conversations[pk]) state.nip04Conversations[pk] = [];
+            state.nip04Conversations[pk].push(msgData);
+        }
+        for (const pk of Object.keys(state.nip04Conversations)) {
+            state.nip04Conversations[pk].sort((a, b) => a.timestamp - b.timestamp);
+        }
+
+        if (cursorRow?.value > 0) {
+            state.lastKind4ProcessedSec = cursorRow.value;
+        }
+
+        console.info(
+            `DB: loaded ${msgRows.length} nip04 messages, ${seenRows.length} seen kind4; cursor=${state.lastKind4ProcessedSec}`
+        );
+    } catch (e) {
+        console.warn('Failed to load NIP-04 state from IndexedDB:', e);
+    }
 }

@@ -15,9 +15,11 @@ import {
     GAP_FILL_DEBOUNCE_MS,
     GAP_FILL_COOLDOWN_MS,
     GAP_FILL_MAX_PAGES,
-    STARTUP_HISTORY_OVERLAP_SECS
+    STARTUP_HISTORY_OVERLAP_SECS,
+    NIP04_INCREMENTAL_INTERVAL_MS,
+    NIP04_HISTORY_LOOKBACK_SECS
 } from './constants.js';
-import { idbPut } from './db.js';
+import { idbPut, dbSaveNip04Cursor } from './db.js';
 import {
     getReadRelayUrls,
     getReadRelayUrlsUnsorted,
@@ -481,6 +483,106 @@ export async function runManualInboxSyncNow() {
     } finally {
         state.manualInboxSyncInFlight = false;
         updateSettingsSyncUiState();
+    }
+}
+
+// ─── NIP-04 (kind 4) sync ─────────────────────────────────────────────────────
+
+export function stopIncrementalNip04Sync() {
+    if (state.incrementalNip04TimerId) {
+        clearInterval(state.incrementalNip04TimerId);
+        state.incrementalNip04TimerId = null;
+    }
+}
+
+export function startIncrementalNip04Sync() {
+    stopIncrementalNip04Sync();
+    state.incrementalNip04TimerId = setInterval(() => {
+        void runIncrementalNip04Sync();
+    }, NIP04_INCREMENTAL_INTERVAL_MS);
+}
+
+export async function runIncrementalNip04Sync() {
+    if (!state.pool || !state.publicKey) return;
+    if (typeof window.nostr?.nip04?.decrypt !== 'function') return;
+    try {
+        const nowSec = Math.floor(Date.now() / 1000);
+        const baseline = state.lastKind4ProcessedSec > 0 ? state.lastKind4ProcessedSec : nowSec - 24 * 60 * 60;
+        const since = Math.max(0, baseline - 2 * 60 * 60);
+        const { handleKind4Event } = await import('./messages.js');
+        const relays = getReadRelayUrls();
+        const [received, sent] = await Promise.all([
+            state.pool.querySync(relays, { kinds: [4], '#p': [state.publicKey], since }, { maxWait: 10000 }).catch(() => []),
+            state.pool.querySync(relays, { kinds: [4], authors: [state.publicKey], since }, { maxWait: 10000 }).catch(() => []),
+        ]);
+        const seen = new Set();
+        const events = [...received, ...sent].filter((ev) => { if (seen.has(ev.id)) return false; seen.add(ev.id); return true; });
+        events.sort((a, b) => a.created_at - b.created_at);
+        for (const ev of events) {
+            await handleKind4Event(ev);
+        }
+        const maxTs = events.reduce((m, ev) => Math.max(m, ev.created_at), state.lastKind4ProcessedSec);
+        if (maxTs > state.lastKind4ProcessedSec) {
+            state.lastKind4ProcessedSec = maxTs;
+            dbSaveNip04Cursor(maxTs);
+        }
+        const { updateConversationsList } = await import('./ui.js');
+        updateConversationsList();
+    } catch (err) {
+        console.warn('Incremental NIP-04 sync failed:', err);
+    }
+}
+
+export async function loadHistoricalNip04Messages() {
+    if (!state.pool || !state.publicKey) return;
+    if (typeof window.nostr?.nip04?.decrypt !== 'function') {
+        console.info('NIP-04: window.nostr.nip04 not available, skipping history load');
+        return;
+    }
+    try {
+        const nowSec = Math.floor(Date.now() / 1000);
+        const since = nowSec - NIP04_HISTORY_LOOKBACK_SECS;
+        const { handleKind4Event } = await import('./messages.js');
+        const relays = getReadRelayUrls();
+        const PAGE_LIMIT = 500;
+        const MAX_PAGES = 6;
+        const allSeen = new Set();
+        const allEvents = [];
+
+        // Page through received and sent in parallel per page
+        for (let page = 0; page < MAX_PAGES; page++) {
+            const until = allEvents.length > 0
+                ? allEvents[allEvents.length - 1].created_at - 1
+                : undefined;
+            const filter = (extra) => ({ kinds: [4], since, limit: PAGE_LIMIT, ...extra, ...(until !== undefined ? { until } : {}) });
+            const [received, sent] = await Promise.all([
+                state.pool.querySync(relays, filter({ '#p': [state.publicKey] }), { maxWait: 20000 }).catch(() => []),
+                state.pool.querySync(relays, filter({ authors: [state.publicKey] }), { maxWait: 20000 }).catch(() => []),
+            ]);
+            const pageEvents = [...received, ...sent].filter((ev) => {
+                if (allSeen.has(ev.id)) return false;
+                allSeen.add(ev.id);
+                return true;
+            });
+            if (pageEvents.length === 0) break;
+            pageEvents.sort((a, b) => b.created_at - a.created_at);
+            allEvents.push(...pageEvents);
+            if (received.length < PAGE_LIMIT && sent.length < PAGE_LIMIT) break;
+        }
+
+        allEvents.sort((a, b) => a.created_at - b.created_at);
+        for (const ev of allEvents) {
+            await handleKind4Event(ev);
+        }
+        const maxTs = allEvents.reduce((m, ev) => Math.max(m, ev.created_at), state.lastKind4ProcessedSec);
+        if (maxTs > state.lastKind4ProcessedSec) {
+            state.lastKind4ProcessedSec = maxTs;
+            dbSaveNip04Cursor(maxTs);
+        }
+        const { updateConversationsList } = await import('./ui.js');
+        updateConversationsList();
+    } catch (err) {
+        console.warn('NIP-04 history load failed:', err);
     }
 }
 

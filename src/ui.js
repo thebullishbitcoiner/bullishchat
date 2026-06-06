@@ -218,7 +218,7 @@ export function updateConversationsList() {
             state.conversationItemEls.set(pubkey, row);
         }
 
-        row.item.className = 'conversation-item' + (state.currentChat === pubkey ? ' active' : '');
+        row.item.className = 'conversation-item' + (state.currentChat === pubkey && state.currentChatProtocol !== 'nip04' ? ' active' : '');
         row.nameEl.textContent = displayName;
         row.dateEl.textContent = dateIndicator;
         row.previewEl.textContent = preview;
@@ -230,6 +230,54 @@ export function updateConversationsList() {
         if (!seen.has(pubkey)) {
             row.item.remove();
             state.conversationItemEls.delete(pubkey);
+        }
+    }
+
+    // NIP-04 section
+    const nip04Pubkeys = Object.keys(state.nip04Conversations).sort(
+        (a, b) => lastConversationSortTime(state.nip04Conversations[b]) - lastConversationSortTime(state.nip04Conversations[a])
+    );
+
+    let divider = list.querySelector('.protocol-divider');
+    if (nip04Pubkeys.length > 0) {
+        if (!divider) {
+            divider = document.createElement('div');
+            divider.className = 'protocol-divider';
+            divider.textContent = 'NIP-04 · Legacy Encrypted';
+        }
+        list.appendChild(divider);
+    } else if (divider) {
+        divider.remove();
+    }
+
+    const seenNip04 = new Set();
+    for (const pubkey of nip04Pubkeys) {
+        seenNip04.add(pubkey);
+        const conv = state.nip04Conversations[pubkey];
+        const lastMsg = conv.length > 0 ? conv[conv.length - 1] : null;
+        const displayName = getDisplayName(pubkey);
+        const dateIndicator = lastMsg ? formatConversationDate(lastMsg.timestamp) : '';
+        const preview = formatConversationPreview(lastMsg);
+
+        let row = state.nip04ConversationItemEls.get(pubkey);
+        if (!row) {
+            row = createConversationItem(pubkey);
+            row.item.onclick = () => openNip04Chat(pubkey);
+            state.nip04ConversationItemEls.set(pubkey, row);
+        }
+
+        row.item.className = 'conversation-item' + (state.currentChat === pubkey && state.currentChatProtocol === 'nip04' ? ' active' : '');
+        row.nameEl.textContent = displayName;
+        row.dateEl.textContent = dateIndicator;
+        row.previewEl.textContent = preview;
+        updateAvatarHost(row.avatarHost, pubkey);
+        list.appendChild(row.item);
+    }
+
+    for (const [pubkey, row] of state.nip04ConversationItemEls.entries()) {
+        if (!seenNip04.has(pubkey)) {
+            row.item.remove();
+            state.nip04ConversationItemEls.delete(pubkey);
         }
     }
 }
@@ -244,6 +292,7 @@ export function setMobileChatPanel(open) {
 
 export function openChat(pubkey) {
     state.currentChat = normalizePubkey(pubkey);
+    state.currentChatProtocol = 'nip17';
     document.getElementById('emptyState').style.display = 'none';
     document.getElementById('chatView').style.display = 'flex';
 
@@ -256,6 +305,22 @@ export function openChat(pubkey) {
     displayMessages(pubkey);
     updateConversationsList();
     void fetchConversationRepair(state.currentChat, { deep: true });
+    void updateRightPanel(state.currentChat);
+}
+
+export function openNip04Chat(pubkey) {
+    state.currentChat = normalizePubkey(pubkey);
+    state.currentChatProtocol = 'nip04';
+    document.getElementById('emptyState').style.display = 'none';
+    document.getElementById('chatView').style.display = 'flex';
+
+    if (isMobileLayout()) {
+        setMobileChatPanel(true);
+    }
+
+    updateChatHeader(pubkey);
+    displayNip04Messages(pubkey);
+    updateConversationsList();
     void updateRightPanel(state.currentChat);
 }
 
@@ -700,6 +765,67 @@ export function displayMessages(pubkey) {
         scrollToBottom();
         requestAnimationFrame(scrollToBottom);
     });
+}
+
+export function displayNip04Messages(pubkey) {
+    const container = document.getElementById('messagesContainer');
+    revokeActiveMessageBlobs();
+    container.innerHTML = '';
+
+    const banner = document.createElement('div');
+    banner.className = 'nip04-banner';
+    banner.textContent = '⚠ NIP-04 — legacy encryption, metadata visible to relays';
+    container.appendChild(banner);
+
+    if (!state.nip04Conversations[pubkey]) return;
+
+    let lastDate = null;
+
+    state.nip04Conversations[pubkey].forEach((msg) => {
+        const msgDate = new Date(msg.timestamp * 1000);
+        const currentDate = new Date(msgDate.getFullYear(), msgDate.getMonth(), msgDate.getDate());
+
+        if (lastDate === null || currentDate.getTime() !== lastDate.getTime()) {
+            const dateSeparator = document.createElement('div');
+            dateSeparator.className = 'date-separator';
+            dateSeparator.textContent = formatDateSeparator(msg.timestamp);
+            container.appendChild(dateSeparator);
+            lastDate = currentDate;
+        }
+
+        const div = document.createElement('div');
+        div.className = 'message ' + (msg.from === state.publicKey ? 'sent' : 'received');
+
+        const bodyEl = document.createElement('div');
+        bodyEl.className = 'message-body';
+        const parsedInvoice = parseBolt11InvoiceFromText(msg.content);
+        if (parsedInvoice) {
+            div.classList.add('message-invoice');
+            if (parsedInvoice.cleanedText) appendRichMessageContent(bodyEl, parsedInvoice.cleanedText);
+            const invoiceCard = document.createElement('div');
+            invoiceCard.className = 'invoice-card';
+            const amtEl = document.createElement('div');
+            amtEl.className = 'invoice-amount';
+            const msats = parsedInvoice.decoded?.satoshi != null ? parsedInvoice.decoded.satoshi * 1000 : null;
+            amtEl.textContent = msats != null ? `${(msats / 1000).toLocaleString()} sats` : 'Lightning Invoice';
+            invoiceCard.appendChild(amtEl);
+            bodyEl.appendChild(invoiceCard);
+        } else {
+            appendRichMessageContent(bodyEl, msg.content);
+        }
+
+        const timeEl = document.createElement('div');
+        timeEl.className = 'message-time';
+        timeEl.textContent = new Date(msg.timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+        div.appendChild(bodyEl);
+        div.appendChild(timeEl);
+        container.appendChild(div);
+    });
+
+    const scrollToBottom = () => { container.scrollTop = container.scrollHeight; };
+    scrollToBottom();
+    requestAnimationFrame(() => { scrollToBottom(); requestAnimationFrame(scrollToBottom); });
 }
 
 export function initImageLightbox() {

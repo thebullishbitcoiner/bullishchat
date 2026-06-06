@@ -3,7 +3,7 @@ import { SimplePool } from 'nostr-tools';
 
 import { state } from './state.js';
 import { RELAY_URLS, normalizePubkey } from './constants.js';
-import { initDB, loadStateFromDB, idbPut } from './db.js';
+import { initDB, loadStateFromDB, loadNip04StateFromDB, idbPut } from './db.js';
 import {
     connectRelaySet,
     resolveInboxRelays,
@@ -11,13 +11,17 @@ import {
 import { prefetchMissingConversationProfiles } from './profile.js';
 import {
     subscribeToMessages,
-    sendMessage
+    sendMessage,
+    subscribeToNip04Messages
 } from './messages.js';
 import {
     resetSessionSyncState,
     startIncrementalInboxSync,
     stopIncrementalInboxSync,
+    startIncrementalNip04Sync,
+    stopIncrementalNip04Sync,
     fetchHistoricalGiftWraps,
+    loadHistoricalNip04Messages,
     updateSettingsSyncUiState,
     scheduleMobileCatchup
 } from './sync.js';
@@ -93,7 +97,9 @@ async function connectWithExtension() {
                 console.warn('Destroying previous relay pool:', e);
             }
         }
+        stopIncrementalNip04Sync();
         state.lastInboxGiftWrapProcessedSec = 0;
+        state.lastKind4ProcessedSec = 0;
         // enableReconnect: pool automatically re-establishes dropped WebSocket connections
         // and re-sends active subscriptions, covering desktop WiFi drops without manual catchup.
         state.pool = new SimplePool({ enableReconnect: true });
@@ -137,6 +143,7 @@ async function connectWithExtension() {
         // Load persisted state from IndexedDB before showing conversations — instant display
         // for returning users without waiting for relay queries to complete.
         await loadStateFromDB(state.publicKey);
+        await loadNip04StateFromDB(state.publicKey);
         updateConversationsList();
 
         setInboxLoading(true);
@@ -145,12 +152,15 @@ async function connectWithExtension() {
         // Live subscription first so new mail arrives while history is still decrypting.
         // History uses paginated querySync (relay result caps) + batched UI updates for mobile perf.
         subscribeToMessages();
+        subscribeToNip04Messages();
         startIncrementalInboxSync();
+        startIncrementalNip04Sync();
         updateSettingsSyncUiState();
         void fetchHistoricalGiftWraps().finally(() => {
             setInboxLoading(false);
             prefetchMissingConversationProfiles();
         });
+        void loadHistoricalNip04Messages();
 
     } catch (error) {
         setInboxLoading(false);

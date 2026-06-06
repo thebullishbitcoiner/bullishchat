@@ -9,8 +9,8 @@ import {
     HTTP_URL_IN_TEXT_RE,
     RELAY_URLS
 } from './constants.js';
-import { dbMarkWrapSeen, dbSaveMessage } from './db.js';
-import { getReadRelayUrls, resolveInboxRelays, getRandomPastTimestamp, nostrAuthHandler } from './relay.js';
+import { dbMarkWrapSeen, dbSaveMessage, dbSaveNip04Message, dbMarkKind4Seen } from './db.js';
+import { getReadRelayUrls, getReadRelayUrlsUnsorted, resolveInboxRelays, getRandomPastTimestamp, nostrAuthHandler } from './relay.js';
 import { fetchUserProfile } from './profile.js';
 import { queueActiveChatRender, queueConversationsListUpdate, queueChatHeaderUpdate } from './queue.js';
 
@@ -871,6 +871,12 @@ export async function sendMessage() {
 
     if (!content || !state.currentChat) return;
 
+    if (state.currentChatProtocol === 'nip04') {
+        await sendNip04Message(state.currentChat, content);
+        input.value = '';
+        return;
+    }
+
     sendBtn.disabled = true;
     sendBtn.innerHTML = '<div class="loading"></div>';
 
@@ -913,4 +919,116 @@ export async function sendMessage() {
         sendBtn.disabled = false;
         sendBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>';
     }
+}
+
+// ─── NIP-04 (kind 4) helpers ──────────────────────────────────────────────────
+
+async function decryptNip04(ciphertext, theirPubkey) {
+    return window.nostr.nip04.decrypt(theirPubkey, ciphertext);
+}
+
+async function encryptNip04(plaintext, theirPubkey) {
+    return window.nostr.nip04.encrypt(theirPubkey, plaintext);
+}
+
+export async function handleKind4Event(event) {
+    if (!event?.id || !event?.pubkey) return;
+    if (state.seenKind4EventIds.has(event.id)) return;
+    state.seenKind4EventIds.add(event.id);
+    dbMarkKind4Seen(event.id);
+
+    const peerPubkey = event.pubkey === state.publicKey
+        ? (event.tags.find(t => t[0] === 'p')?.[1] ?? null)
+        : event.pubkey;
+    if (!peerPubkey) return;
+
+    let content;
+    try {
+        content = await decryptNip04(event.content, peerPubkey);
+    } catch (e) {
+        console.warn('NIP-04 decrypt failed:', event.id, e);
+        return;
+    }
+
+    const msg = {
+        id: event.id,
+        kind: 4,
+        content,
+        timestamp: event.created_at,
+        from: event.pubkey,
+    };
+
+    if (!state.nip04Conversations[peerPubkey]) state.nip04Conversations[peerPubkey] = [];
+    if (state.nip04Conversations[peerPubkey].some(m => m.id === msg.id)) return;
+    state.nip04Conversations[peerPubkey].push(msg);
+    state.nip04Conversations[peerPubkey].sort((a, b) => a.timestamp - b.timestamp);
+
+    dbSaveNip04Message(peerPubkey, msg);
+
+    if (!state.userProfiles[peerPubkey]) fetchUserProfile(peerPubkey);
+
+    queueConversationsListUpdate();
+    if (state.currentChat === peerPubkey && state.currentChatProtocol === 'nip04') {
+        queueActiveChatRender();
+    }
+}
+
+export async function sendNip04Message(peerPubkey, text) {
+    const sendBtn = document.getElementById('sendBtn');
+    if (sendBtn) {
+        sendBtn.disabled = true;
+        sendBtn.innerHTML = '<div class="loading"></div>';
+    }
+    try {
+        const ciphertext = await encryptNip04(text, peerPubkey);
+        const now = Math.floor(Date.now() / 1000);
+        const unsigned = {
+            kind: 4,
+            pubkey: state.publicKey,
+            created_at: now,
+            tags: [['p', peerPubkey]],
+            content: ciphertext,
+        };
+        const signed = await window.nostr.signEvent(unsigned);
+        state.pool.publish(RELAY_URLS, signed);
+
+        const localMsg = { id: signed.id, kind: 4, content: text, timestamp: now, from: state.publicKey };
+        if (!state.nip04Conversations[peerPubkey]) state.nip04Conversations[peerPubkey] = [];
+        state.nip04Conversations[peerPubkey].push(localMsg);
+        state.seenKind4EventIds.add(signed.id);
+        dbSaveNip04Message(peerPubkey, localMsg);
+        dbMarkKind4Seen(signed.id);
+
+        const { displayNip04Messages, updateConversationsList } = await import('./ui.js');
+        displayNip04Messages(peerPubkey);
+        updateConversationsList();
+    } catch (e) {
+        alert('Failed to send NIP-04 message: ' + e.message);
+        console.error(e);
+    } finally {
+        if (sendBtn) {
+            sendBtn.disabled = false;
+            sendBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>';
+        }
+    }
+}
+
+export function subscribeToNip04Messages() {
+    if (!state.pool || !state.publicKey) return;
+    if (typeof window.nostr?.nip04?.decrypt !== 'function') {
+        console.info('NIP-04: window.nostr.nip04 not available, skipping subscription');
+        return;
+    }
+
+    const since = Math.floor(Date.now() / 1000);
+    const relays = getReadRelayUrlsUnsorted();
+    const onEvent = (ev) => handleKind4Event(ev).catch((e) => console.warn('NIP-04 event error:', e));
+
+    const subReceived = state.pool.subscribe(relays, { kinds: [4], '#p': [state.publicKey], since }, {
+        onevent: onEvent,
+    });
+    const subSent = state.pool.subscribe(relays, { kinds: [4], authors: [state.publicKey], since }, {
+        onevent: onEvent,
+    });
+    state.kind4Subscription = [subReceived, subSent];
 }
