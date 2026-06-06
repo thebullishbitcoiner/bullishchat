@@ -68,7 +68,7 @@ body:not(.is-authenticated) .container {
 
 .sidebar {
     position: relative;
-    width: 320px;
+    width: 300px;
     min-height: 0;
     background: var(--bg-panel);
     border-right: 1px solid var(--border-subtle);
@@ -85,7 +85,7 @@ body:not(.is-authenticated) .sidebar {
 }
 
 body.is-authenticated .sidebar {
-    width: 320px;
+    width: 300px;
     max-width: none;
     background: var(--bg-panel);
     border-right: 1px solid var(--border-subtle);
@@ -162,72 +162,6 @@ body:not(.is-authenticated) .sidebar-settings-btn {
     display: none !important;
 }
 
-.status-indicator {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 13px;
-    color: var(--text-muted);
-    position: relative;
-}
-
-body:not(.is-authenticated) .status-indicator--compact {
-    font-size: 12px;
-    color: #6d685e;
-}
-
-/* Connected: show relay list on hover or keyboard focus (not the OS “help” ? cursor) */
-.status-indicator:has(.status-dot.connected) {
-    outline: none;
-}
-
-.status-relay-popover {
-    position: absolute;
-    left: 0;
-    top: calc(100% + 6px);
-    z-index: 50;
-    min-width: 220px;
-    max-width: min(92vw, 380px);
-    max-height: 240px;
-    overflow-y: auto;
-    padding: 10px 12px;
-    background: #1e1e1e;
-    border: 1px solid #333;
-    border-radius: 8px;
-    font-size: 12px;
-    line-height: 1.45;
-    color: #c8c8c8;
-    white-space: pre-line;
-    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
-    opacity: 0;
-    visibility: hidden;
-    pointer-events: none;
-    transition: opacity 0.12s ease, visibility 0.12s ease;
-}
-
-.status-indicator:hover .status-relay-popover:not(:empty),
-.status-indicator:focus-visible .status-relay-popover:not(:empty) {
-    opacity: 1;
-    visibility: visible;
-}
-
-.status-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: #666;
-    animation: pulse 2s ease-in-out infinite;
-}
-
-.status-dot.connected {
-    background: #4ade80;
-    box-shadow: 0 0 8px #4ade80;
-}
-
-@keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.5; }
-}
 
 .connection-setup {
     flex-shrink: 0;
@@ -285,6 +219,12 @@ body:not(.is-authenticated) .status-indicator--compact {
     border-radius: 12px;
     box-shadow: 0 1px 0 rgba(255, 255, 255, 0.12) inset, 0 12px 40px rgba(232, 137, 12, 0.18);
     animation: landing-rise 0.85s ease-out 0.18s both;
+}
+
+.btn-landing:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    box-shadow: none;
 }
 
 .landing-extensions {
@@ -2469,6 +2409,87 @@ body.is-authenticated .sidebar-fab:not([hidden]) {
 
     .emoji-grid {
         grid-template-columns: repeat(8, minmax(0, 1fr));
+    }
+
+    .right-panel {
+        display: none !important;
+    }
+}
+
+/* ── Right panel ─────────────────────────────────────────────────────────── */
+
+.right-panel[hidden] {
+    display: none !important;
+}
+
+.right-panel {
+    width: 300px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-panel);
+    border-left: 1px solid var(--border-subtle);
+    overflow: hidden;
+}
+
+.right-panel-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.right-panel-card {
+    background: var(--accent-soft);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.right-panel-card-title {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 2px;
+}
+
+.right-panel-card-sep {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-top: 4px;
+}
+
+.right-panel-relay {
+    font-size: 12px;
+    color: var(--text-primary);
+    word-break: break-all;
+    line-height: 1.35;
+}
+
+.right-panel-relay--error {
+    color: var(--text-muted);
+}
+
+.right-panel-empty {
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.5;
+}
+
+/* Hide right panel below 1100px to avoid crowding */
+@media (max-width: 1100px) {
+    .right-panel {
+        display: none !important;
     }
 }
 

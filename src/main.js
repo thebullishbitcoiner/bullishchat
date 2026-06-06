@@ -7,7 +7,6 @@ import { initDB, loadStateFromDB, idbPut } from './db.js';
 import {
     connectRelaySet,
     resolveInboxRelays,
-    setRelayStatusTooltip,
 } from './relay.js';
 import { prefetchMissingConversationProfiles } from './profile.js';
 import {
@@ -32,7 +31,8 @@ import {
     setMobileChatPanel,
     backToConversations,
     displayMessages,
-    updateChatHeader
+    updateChatHeader,
+    updateRelayStatusCard
 } from './ui.js';
 import { initSettingsUi, loadOwnCustomReactionSetFromNostr } from './settings.js';
 
@@ -47,12 +47,22 @@ async function connectWithExtension() {
         return;
     }
 
+    const loginBtn = document.querySelector('.btn-landing');
+    if (loginBtn) {
+        loginBtn.disabled = true;
+        loginBtn.textContent = 'Connecting…';
+    }
+
     try {
         // Get public key from extension (normalize so tag/filter comparisons match)
         state.publicKey = normalizePubkey(await window.nostr.getPublicKey());
 
         // Check if extension supports NIP-44 (required for this app)
         if (!window.nostr.nip44 || !window.nostr.nip44.encrypt || !window.nostr.nip44.decrypt) {
+            if (loginBtn) {
+                loginBtn.disabled = false;
+                loginBtn.textContent = 'Login with Nostr';
+            }
             alert('Your Nostr extension does not support NIP-44 encryption/decryption.\n\n' +
                   'This app requires NIP-44 support for secure messaging.\n\n' +
                   'Please use an extension that supports NIP-44:\n' +
@@ -89,7 +99,6 @@ async function connectWithExtension() {
         state.pool = new SimplePool({ enableReconnect: true });
 
         // Bootstrap against defaults + relay-list indexers to discover our kind 10050.
-        document.getElementById('statusText').textContent = 'Connecting to relays...';
         const bootstrapResults = await connectRelaySet(RELAY_URLS);
 
         // Full three-tier resolution: kind 10050 on current set → discovery relays → NIP-65 fallback.
@@ -105,17 +114,11 @@ async function connectWithExtension() {
         const additionalRelayUrls = state.dmRelayUrls.filter((url) => !RELAY_URLS.includes(url));
         const additionalResults = additionalRelayUrls.length ? await connectRelaySet(additionalRelayUrls) : [];
         const relayResults = [...bootstrapResults, ...additionalResults];
-        const successfulConnections = relayResults.filter((r) => r.success).length;
-        const totalConnectedTargets = [...new Set([...RELAY_URLS, ...additionalRelayUrls])].length;
         const relayStatusByUrl = new Map(relayResults.map((r) => [r.url, r]));
         const inboxRelayStatuses = ownInboxRelays.length
             ? state.dmRelayUrls.map((url) => relayStatusByUrl.get(url) || { url, success: false })
             : [];
 
-        document.getElementById('statusDot').classList.add('connected');
-        document.getElementById('statusText').textContent = ownInboxRelays.length
-            ? `Connected to ${successfulConnections}/${totalConnectedTargets} relays`
-            : `Connected to ${successfulConnections}/${RELAY_URLS.length} relays`;
         document.getElementById('connectionSetup').style.display = 'none';
         document.body.classList.add('is-authenticated');
         const fab = document.getElementById('sidebarFab');
@@ -129,7 +132,7 @@ async function connectWithExtension() {
         const chatAreaEl = document.getElementById('chatArea');
         if (chatAreaEl) chatAreaEl.removeAttribute('hidden');
 
-        setRelayStatusTooltip(bootstrapResults, inboxRelayStatuses);
+        updateRelayStatusCard(bootstrapResults, inboxRelayStatuses);
 
         // Load persisted state from IndexedDB before showing conversations — instant display
         // for returning users without waiting for relay queries to complete.
@@ -151,6 +154,10 @@ async function connectWithExtension() {
 
     } catch (error) {
         setInboxLoading(false);
+        if (loginBtn) {
+            loginBtn.disabled = false;
+            loginBtn.textContent = 'Login with Nostr';
+        }
         alert('Connection failed: ' + error.message);
         console.error(error);
     }

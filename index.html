@@ -32,11 +32,6 @@
                     <span class="app-name">bullishChat</span>
                     <span class="app-version" id="appVersion" aria-label="App version"></span>
                 </h1>
-                <div class="status-indicator status-indicator--compact" id="statusIndicator">
-                    <div class="status-dot" id="statusDot"></div>
-                    <span id="statusText">Not connected</span>
-                    <div class="status-relay-popover" id="statusRelayPopover" role="tooltip"></div>
-                </div>
             </div>
 
             <div class="connection-setup" id="connectionSetup">
@@ -134,7 +129,11 @@
                 </div>
             </div>
         </div>
-    </div>
+
+        <div class="right-panel" id="rightPanel" hidden>
+            <div class="right-panel-body" id="rightPanelBody"></div>
+        </div>
+    </div><!-- /.container -->
 
     <div id="newChatModal" class="modal-backdrop" hidden>
         <div class="modal modal--new-chat" role="dialog" aria-modal="true" aria-labelledby="newChatModalTitle" tabindex="-1">

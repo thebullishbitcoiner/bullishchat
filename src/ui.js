@@ -9,6 +9,7 @@ import {
     NOSTR_ARCHIVES_SEARCH_SUGGEST_URL
 } from './constants.js';
 import { getDisplayName, fetchUserProfile } from './profile.js';
+import { resolveInboxRelays } from './relay.js';
 import {
     sendReactionToMessage,
     payLightningInvoice,
@@ -255,10 +256,12 @@ export function openChat(pubkey) {
     displayMessages(pubkey);
     updateConversationsList();
     void fetchConversationRepair(state.currentChat, { deep: true });
+    void updateRightPanel(state.currentChat);
 }
 
 export function backToConversations() {
     setMobileChatPanel(false);
+    void updateRightPanel(null);
 }
 
 // Update chat header with display name
@@ -1279,4 +1282,93 @@ export function initNewChatUi() {
         }
         closeFabMenu();
     });
+}
+
+export function updateRelayStatusCard(defaultResults, inboxResults = []) {
+    const body = document.getElementById('rightPanelBody');
+    const panel = document.getElementById('rightPanel');
+    if (!body || !panel) return;
+
+    panel.removeAttribute('hidden');
+
+    const existing = document.getElementById('relayStatusCard');
+    if (existing) existing.remove();
+
+    const card = document.createElement('div');
+    card.className = 'right-panel-card';
+    card.id = 'relayStatusCard';
+
+    const allResults = [...defaultResults, ...inboxResults];
+    const connected = allResults.filter((r) => r.success).length;
+
+    const titleEl = document.createElement('div');
+    titleEl.className = 'right-panel-card-title';
+    titleEl.textContent = `Relays · ${connected}/${allResults.length}`;
+    card.appendChild(titleEl);
+
+    const addRows = (results) => {
+        for (const { url, success } of results) {
+            const row = document.createElement('div');
+            row.className = `right-panel-relay${success ? '' : ' right-panel-relay--error'}`;
+            row.textContent = url.replace(/^wss?:\/\//, '');
+            card.appendChild(row);
+        }
+    };
+
+    addRows(defaultResults);
+
+    if (inboxResults.length > 0) {
+        const sep = document.createElement('div');
+        sep.className = 'right-panel-card-sep';
+        sep.textContent = 'Inbox relays';
+        card.appendChild(sep);
+        addRows(inboxResults);
+    }
+
+    body.insertBefore(card, body.firstChild);
+}
+
+export async function updateRightPanel(pubkey) {
+    const body = document.getElementById('rightPanelBody');
+    if (!body) return;
+
+    const existing = document.getElementById('conversationRelayCard');
+    if (existing) existing.remove();
+
+    if (!pubkey) return;
+
+    const card = document.createElement('div');
+    card.className = 'right-panel-card';
+    card.id = 'conversationRelayCard';
+
+    const titleEl = document.createElement('div');
+    titleEl.className = 'right-panel-card-title';
+    titleEl.textContent = `${getDisplayName(pubkey)}'s Inbox Relays`;
+    card.appendChild(titleEl);
+
+    const loading = document.createElement('p');
+    loading.className = 'right-panel-empty';
+    loading.textContent = 'Loading…';
+    card.appendChild(loading);
+
+    body.appendChild(card);
+
+    const relays = await resolveInboxRelays(pubkey);
+    if (!card.contains(loading)) return;
+    card.removeChild(loading);
+
+    if (!relays.length) {
+        const empty = document.createElement('p');
+        empty.className = 'right-panel-empty';
+        empty.textContent = 'No inbox relays published.';
+        card.appendChild(empty);
+        return;
+    }
+
+    for (const url of relays) {
+        const row = document.createElement('div');
+        row.className = 'right-panel-relay';
+        row.textContent = url.replace(/^wss?:\/\//, '');
+        card.appendChild(row);
+    }
 }

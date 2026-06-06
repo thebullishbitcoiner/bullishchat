@@ -61,7 +61,7 @@ export async function fetchNip65InboxRelays(authorPubkey, queryRelays) {
  * Resolve inbox relays for a pubkey with a three-tier fallback chain used by all
  * major NIP-17 clients (Amethyst, Coracle, 0xchat):
  *   1. kind 10050 on current relay set
- *   2. kind 10050 on relay-list indexers (purplepag.es, relay.nostr.band)
+ *   2. kind 10050 on relay-list indexers (purplepag.es)
  *   3. kind 10002 NIP-65 inbox relays as last resort
  */
 export async function resolveInboxRelays(authorPubkey) {
@@ -145,29 +145,6 @@ export async function connectRelaySet(relays) {
         })
     );
     return statuses;
-}
-
-export function setRelayStatusTooltip(defaultResults, inboxResults = []) {
-    const indicator = document.getElementById('statusIndicator');
-    const popover = document.getElementById('statusRelayPopover');
-    if (!indicator || !popover) return;
-
-    const lines = ['Default relays:'];
-    for (const { url, success } of defaultResults) {
-        lines.push(`${success ? '✓' : '✗'} ${url}`);
-    }
-    if (inboxResults.length > 0) {
-        lines.push('');
-        lines.push('Inbox relays (kind 10050):');
-        for (const { url, success } of inboxResults) {
-            lines.push(`${success ? '✓' : '✗'} ${url}`);
-        }
-    }
-
-    popover.textContent = lines.join('\n');
-    indicator.setAttribute('aria-describedby', 'statusRelayPopover');
-    indicator.removeAttribute('title');
-    indicator.tabIndex = 0;
 }
 
 // Generate random timestamp within 2 days in the past
