@@ -36,9 +36,13 @@
 
             <div class="connection-setup" id="connectionSetup">
                 <div class="landing-hero">
-                    <p class="landing-eyebrow">NIP-17 · Gift-wrapped DMs</p>
+                    <p class="landing-eyebrow">NIP-17 · NIP-04 · Nostr DMs</p>
                     <h2 class="landing-headline">Private messaging on Nostr</h2>
                     <p class="landing-lede">Sign in with a NIP-07 extension to open your inbox, sync relays, and chat with end-to-end encryption.</p>
+                    <div class="landing-dm-types">
+                        <span class="landing-dm-type landing-dm-type--secure">NIP-17 — gift-wrapped, metadata-private</span>
+                        <span class="landing-dm-type landing-dm-type--legacy">NIP-04 — legacy encrypted DMs</span>
+                    </div>
                 </div>
 
                 <button type="button" class="btn btn-landing" onclick="connectWithExtension()">
@@ -53,6 +57,8 @@
                         <a href="https://github.com/fiatjaf/nos2x" target="_blank" rel="noopener noreferrer">nos2x</a>
                         <span class="landing-extensions-sep" aria-hidden="true">·</span>
                         <a href="https://getflamingo.org/" target="_blank" rel="noopener noreferrer">Flamingo</a>
+                        <span class="landing-extensions-sep" aria-hidden="true">·</span>
+                        <a href="https://chromewebstore.google.com/detail/nostrame/phfdiknibomfgpefcicfckkklimoniej" target="_blank" rel="noopener noreferrer">Nostrame</a>
                         <span class="landing-extensions-sep" aria-hidden="true">·</span>
                         <a href="https://github.com/fiatjaf/horse" target="_blank" rel="noopener noreferrer">horse</a>
                     </p>
@@ -91,7 +97,7 @@
                 </div>
                 <h2 class="empty-state-title">Your inbox</h2>
                 <p class="empty-state-text">Pick a conversation from the list or tap <strong class="empty-state-fab-hint">+</strong> to start a new chat.</p>
-                <p class="empty-state-hint">Messages use NIP-17 gift wraps and NIP-44 encryption.</p>
+                <p class="empty-state-hint">NIP-17 gift-wrapped DMs · NIP-04 legacy DMs</p>
             </div>
 
             <div id="chatView" style="display:none;">

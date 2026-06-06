@@ -200,6 +200,34 @@ body:not(.is-authenticated) .sidebar-settings-btn {
     animation: landing-rise 0.8s ease-out 0.12s both;
 }
 
+.landing-dm-types {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 14px;
+    animation: landing-rise 0.8s ease-out 0.2s both;
+}
+
+.landing-dm-type {
+    font-size: 12px;
+    padding: 5px 10px;
+    border-radius: 6px;
+    display: inline-block;
+    width: fit-content;
+}
+
+.landing-dm-type--secure {
+    background: #1e1208;
+    color: #c87030;
+    border: 1px solid #6b3a18;
+}
+
+.landing-dm-type--legacy {
+    background: #1e1208;
+    color: #c87030;
+    border: 1px solid #6b3a18;
+}
+
 @keyframes landing-rise {
     from {
         opacity: 0;
