@@ -21,3 +21,8 @@ yarn-error.log*
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# Claude Code
+.claude/
+.agents/
+skills-lock.json
