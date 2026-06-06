@@ -218,6 +218,11 @@ document.addEventListener('DOMContentLoaded', function() {
             this.style.height = Math.min(this.scrollHeight, maxHeight) + 'px';
         });
 
+        // iOS Safari keeps the page scrolled after keyboard dismissal; reset it.
+        messageInput.addEventListener('blur', function() {
+            setTimeout(() => window.scrollTo(0, 0), 150);
+        });
+
         // Send on Enter
         messageInput.addEventListener('keydown', function(e) {
             if (e.key === 'Enter' && !e.shiftKey) {
