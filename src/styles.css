@@ -509,8 +509,9 @@ body.is-authenticated .conversations-list {
     font-size: 0.65rem;
     color: var(--muted, #666);
     text-align: center;
-    padding: 6px 12px 4px;
+    padding: 6px 12px 8px;
     border-top: 1px solid var(--border, #2a2a2a);
+    border-bottom: 1px solid var(--border, #2a2a2a);
     letter-spacing: 0.08em;
     text-transform: uppercase;
     user-select: none;

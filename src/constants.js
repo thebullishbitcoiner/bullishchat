@@ -2,7 +2,8 @@
 export const RELAY_URLS = [
     'wss://relay.0xchat.com',
     'wss://relay.damus.io',
-    'wss://relay.primal.net'
+    'wss://relay.primal.net',
+    'wss://nos.lol'
 ];
 
 /** Relay-list indexers used for NIP-17/NIP-65 discovery when kind 10050 is not on default relays. */
@@ -54,7 +55,7 @@ export const IDB_NAME = 'bullishchat';
 export const IDB_VERSION = 3;
 
 export const NIP04_INCREMENTAL_INTERVAL_MS = 45_000;
-export const NIP04_HISTORY_LOOKBACK_SECS = 90 * 24 * 60 * 60;
+export const NIP04_HISTORY_LOOKBACK_SECS = 180 * 24 * 60 * 60;
 
 /** NIP-59 backdating means we need at least a 2-day overlap on startup to avoid missing
  *  messages whose created_at was randomised below the stored cursor. */
