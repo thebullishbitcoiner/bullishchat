@@ -92,9 +92,11 @@ body.is-authenticated .sidebar {
 }
 
 .sidebar-header {
-    position: relative;
     flex-shrink: 0;
-    padding: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px;
     border-bottom: 1px solid var(--border-subtle);
     background: var(--bg-panel-top);
 }
@@ -102,19 +104,17 @@ body.is-authenticated .sidebar {
 body:not(.is-authenticated) .sidebar-header {
     border-bottom: none;
     background: transparent;
-    padding-bottom: 12px;
 }
 
 .app-title {
     display: flex;
     align-items: baseline;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: 6px;
     font-family: 'Fraunces', Georgia, serif;
-    font-size: 26px;
+    font-size: 21px;
     font-weight: 600;
     color: var(--accent);
-    margin-bottom: 4px;
     line-height: 1.2;
 }
 
@@ -130,9 +130,7 @@ body:not(.is-authenticated) .sidebar-header {
 }
 
 .sidebar-settings-btn {
-    position: absolute;
-    top: 14px;
-    right: 14px;
+    flex-shrink: 0;
     width: 34px;
     height: 34px;
     border: none;
