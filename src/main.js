@@ -36,7 +36,8 @@ import {
     backToConversations,
     displayMessages,
     updateChatHeader,
-    updateRelayStatusCard
+    updateRelayStatusCard,
+    switchConversationTab
 } from './ui.js';
 import { initSettingsUi, loadOwnCustomReactionSetFromNostr } from './settings.js';
 
@@ -126,6 +127,7 @@ async function connectWithExtension() {
             : [];
 
         document.getElementById('connectionSetup').style.display = 'none';
+        document.getElementById('convTabs')?.removeAttribute('hidden');
         document.body.classList.add('is-authenticated');
         const fab = document.getElementById('sidebarFab');
         if (fab) {
@@ -177,6 +179,7 @@ async function connectWithExtension() {
 window.connectWithExtension = connectWithExtension;
 window.sendMessage = sendMessage;
 window.backToConversations = backToConversations;
+window.switchConversationTab = switchConversationTab;
 
 // Diagnostic helper — run __bullishDiag() in the browser console to inspect sync state
 window.__bullishDiag = () => {

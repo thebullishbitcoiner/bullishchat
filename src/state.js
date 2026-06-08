@@ -63,6 +63,16 @@ export const state = {
     emojiDiscoverSearchDebounce: null,
     settingsEmojiDraftSet: [],
     mobileCatchupTimer: null,
+    /** 'nip17' | 'nip04' — which tab is shown in the conversation list */
+    activeConversationTab: 'nip17',
+    /** Whether the NIP-04 tab should show an unread dot */
+    nip04HasUnread: false,
+    /** Pubkeys with unread NIP-17 messages (cleared when conversation is opened) */
+    unreadNip17: new Set(),
+    /** Pubkeys with unread NIP-04 messages (cleared when conversation is opened) */
+    unreadNip04: new Set(),
+    /** Unix seconds when this session started — used to skip marking historical loads as unread */
+    sessionStartedAt: Math.floor(Date.now() / 1000),
     /** NIP-04 (kind 4) conversations, keyed by peer pubkey — separate from NIP-17 */
     nip04Conversations: {},
     seenKind4EventIds: new Set(),

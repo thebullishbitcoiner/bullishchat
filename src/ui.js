@@ -197,20 +197,71 @@ export function createConversationItem(pubkey) {
     return { item, avatarHost, nameEl, dateEl, previewEl };
 }
 
+export function setNip04Unread(hasUnread) {
+    state.nip04HasUnread = hasUnread;
+    const dot = document.getElementById('nip04UnreadDot');
+    if (dot) dot.hidden = !hasUnread;
+}
+
+export function switchConversationTab(tab) {
+    state.activeConversationTab = tab;
+    document.getElementById('tabNip17')?.classList.toggle('conv-tab--active', tab === 'nip17');
+    document.getElementById('tabNip04')?.classList.toggle('conv-tab--active', tab === 'nip04');
+    if (tab === 'nip04') setNip04Unread(false);
+    updateConversationsList();
+}
+
 export function updateConversationsList() {
     const list = document.getElementById('conversationsList');
+
+    if (state.activeConversationTab === 'nip04') {
+        // Hide NIP-17 rows
+        for (const [, row] of state.conversationItemEls.entries()) row.item.hidden = true;
+
+        const nip04Pubkeys = Object.keys(state.nip04Conversations).sort(
+            (a, b) => lastConversationSortTime(state.nip04Conversations[b]) - lastConversationSortTime(state.nip04Conversations[a])
+        );
+        const seenNip04 = new Set();
+        for (const pubkey of nip04Pubkeys) {
+            seenNip04.add(pubkey);
+            const conv = state.nip04Conversations[pubkey];
+            const lastMsg = conv.length > 0 ? conv[conv.length - 1] : null;
+
+            let row = state.nip04ConversationItemEls.get(pubkey);
+            if (!row) {
+                row = createConversationItem(pubkey);
+                row.item.onclick = () => openNip04Chat(pubkey);
+                state.nip04ConversationItemEls.set(pubkey, row);
+            }
+
+            const isActive = state.currentChat === pubkey && state.currentChatProtocol === 'nip04';
+            const isUnread = state.unreadNip04.has(pubkey);
+            row.item.hidden = false;
+            row.item.className = 'conversation-item' + (isActive ? ' active' : '') + (isUnread ? ' unread' : '');
+            row.nameEl.textContent = getDisplayName(pubkey);
+            row.dateEl.textContent = lastMsg ? formatConversationDate(lastMsg.timestamp) : '';
+            row.previewEl.textContent = formatConversationPreview(lastMsg);
+            updateAvatarHost(row.avatarHost, pubkey);
+            list.appendChild(row.item);
+        }
+        for (const [pubkey, row] of state.nip04ConversationItemEls.entries()) {
+            if (!seenNip04.has(pubkey)) { row.item.remove(); state.nip04ConversationItemEls.delete(pubkey); }
+        }
+        return;
+    }
+
+    // NIP-17 tab
+    // Hide NIP-04 rows
+    for (const [, row] of state.nip04ConversationItemEls.entries()) row.item.hidden = true;
+
     const orderedPubkeys = Object.keys(state.conversations).sort(
         (a, b) => lastConversationSortTime(state.conversations[b]) - lastConversationSortTime(state.conversations[a])
     );
     const seen = new Set();
-
     for (const pubkey of orderedPubkeys) {
         seen.add(pubkey);
         const conv = state.conversations[pubkey];
         const lastMsg = conv.length > 0 ? conv[conv.length - 1] : null;
-        const displayName = getDisplayName(pubkey);
-        const dateIndicator = lastMsg ? formatConversationDate(lastMsg.timestamp) : '';
-        const preview = formatConversationPreview(lastMsg);
 
         let row = state.conversationItemEls.get(pubkey);
         if (!row) {
@@ -218,67 +269,18 @@ export function updateConversationsList() {
             state.conversationItemEls.set(pubkey, row);
         }
 
-        row.item.className = 'conversation-item' + (state.currentChat === pubkey && state.currentChatProtocol !== 'nip04' ? ' active' : '');
-        row.nameEl.textContent = displayName;
-        row.dateEl.textContent = dateIndicator;
-        row.previewEl.textContent = preview;
+        const isActive = state.currentChat === pubkey && state.currentChatProtocol !== 'nip04';
+        const isUnread = state.unreadNip17.has(pubkey);
+        row.item.hidden = false;
+        row.item.className = 'conversation-item' + (isActive ? ' active' : '') + (isUnread ? ' unread' : '');
+        row.nameEl.textContent = getDisplayName(pubkey);
+        row.dateEl.textContent = lastMsg ? formatConversationDate(lastMsg.timestamp) : '';
+        row.previewEl.textContent = formatConversationPreview(lastMsg);
         updateAvatarHost(row.avatarHost, pubkey);
         list.appendChild(row.item);
     }
-
     for (const [pubkey, row] of state.conversationItemEls.entries()) {
-        if (!seen.has(pubkey)) {
-            row.item.remove();
-            state.conversationItemEls.delete(pubkey);
-        }
-    }
-
-    // NIP-04 section
-    const nip04Pubkeys = Object.keys(state.nip04Conversations).sort(
-        (a, b) => lastConversationSortTime(state.nip04Conversations[b]) - lastConversationSortTime(state.nip04Conversations[a])
-    );
-
-    let divider = list.querySelector('.protocol-divider');
-    if (nip04Pubkeys.length > 0) {
-        if (!divider) {
-            divider = document.createElement('div');
-            divider.className = 'protocol-divider';
-            divider.textContent = 'NIP-04 · Legacy Encrypted';
-        }
-        list.appendChild(divider);
-    } else if (divider) {
-        divider.remove();
-    }
-
-    const seenNip04 = new Set();
-    for (const pubkey of nip04Pubkeys) {
-        seenNip04.add(pubkey);
-        const conv = state.nip04Conversations[pubkey];
-        const lastMsg = conv.length > 0 ? conv[conv.length - 1] : null;
-        const displayName = getDisplayName(pubkey);
-        const dateIndicator = lastMsg ? formatConversationDate(lastMsg.timestamp) : '';
-        const preview = formatConversationPreview(lastMsg);
-
-        let row = state.nip04ConversationItemEls.get(pubkey);
-        if (!row) {
-            row = createConversationItem(pubkey);
-            row.item.onclick = () => openNip04Chat(pubkey);
-            state.nip04ConversationItemEls.set(pubkey, row);
-        }
-
-        row.item.className = 'conversation-item' + (state.currentChat === pubkey && state.currentChatProtocol === 'nip04' ? ' active' : '');
-        row.nameEl.textContent = displayName;
-        row.dateEl.textContent = dateIndicator;
-        row.previewEl.textContent = preview;
-        updateAvatarHost(row.avatarHost, pubkey);
-        list.appendChild(row.item);
-    }
-
-    for (const [pubkey, row] of state.nip04ConversationItemEls.entries()) {
-        if (!seenNip04.has(pubkey)) {
-            row.item.remove();
-            state.nip04ConversationItemEls.delete(pubkey);
-        }
+        if (!seen.has(pubkey)) { row.item.remove(); state.conversationItemEls.delete(pubkey); }
     }
 }
 
@@ -293,6 +295,7 @@ export function setMobileChatPanel(open) {
 export function openChat(pubkey) {
     state.currentChat = normalizePubkey(pubkey);
     state.currentChatProtocol = 'nip17';
+    state.unreadNip17.delete(state.currentChat);
     document.getElementById('emptyState').style.display = 'none';
     document.getElementById('chatView').style.display = 'flex';
 
@@ -311,6 +314,7 @@ export function openChat(pubkey) {
 export function openNip04Chat(pubkey) {
     state.currentChat = normalizePubkey(pubkey);
     state.currentChatProtocol = 'nip04';
+    state.unreadNip04.delete(state.currentChat);
     document.getElementById('emptyState').style.display = 'none';
     document.getElementById('chatView').style.display = 'flex';
 

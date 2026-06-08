@@ -423,6 +423,18 @@ body.is-authenticated .conversations-list {
     border-bottom: 1px solid #1a1a1a;
     cursor: pointer;
     transition: background 0.2s;
+    position: relative;
+}
+
+.conversation-item.unread::after {
+    content: '';
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
 }
 
 .conversation-item-main {
@@ -488,10 +500,10 @@ body.is-authenticated .conversations-list {
 
 .conversation-item-top {
     display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
+    justify-content: flex-start;
+    align-items: baseline;
     margin-bottom: 4px;
-    gap: 8px;
+    gap: 5px;
 }
 
 .conversation-item:hover {
@@ -501,6 +513,53 @@ body.is-authenticated .conversations-list {
 .conversation-item.active {
     background: #1f1f1f;
     border-left: 3px solid var(--accent);
+}
+
+.conv-tabs[hidden] {
+    display: none !important;
+}
+
+.conv-tabs {
+    display: flex;
+    flex-shrink: 0;
+    border-bottom: 1px solid var(--border-subtle);
+    background: var(--bg-panel-top);
+}
+
+.conv-tab {
+    flex: 1;
+    padding: 9px 12px;
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    color: #666;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    position: relative;
+}
+
+.conv-tab:hover {
+    color: #999;
+}
+
+.conv-tab--active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+}
+
+.conv-tab-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex-shrink: 0;
 }
 
 .protocol-divider {
@@ -530,14 +589,17 @@ body.is-authenticated .conversations-list {
     font-size: 13px;
     font-weight: 500;
     color: var(--accent);
-    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
 }
 
 .conversation-date {
     font-size: 11px;
     color: #666;
-    margin-left: 8px;
     white-space: nowrap;
+    flex-shrink: 0;
 }
 
 .conversation-preview {

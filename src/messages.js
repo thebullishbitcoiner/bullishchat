@@ -601,6 +601,12 @@ export async function handleGiftWrappedMessage(giftWrap, options = {}) {
             state.conversations[conversationPubkey].sort((a, b) => a.timestamp - b.timestamp);
             dbSaveMessage(conversationPubkey, newMsg);
 
+            if (newMsg.timestamp > state.sessionStartedAt) {
+                if (state.currentChat !== conversationPubkey || state.currentChatProtocol !== 'nip17') {
+                    state.unreadNip17.add(conversationPubkey);
+                }
+            }
+
             if (!options.suppressUi) {
                 const { updateConversationsList } = await import('./ui.js');
                 updateConversationsList();
@@ -967,9 +973,17 @@ export async function handleKind4Event(event) {
 
     if (!state.userProfiles[peerPubkey]) fetchUserProfile(peerPubkey);
 
+    if (msg.timestamp > state.sessionStartedAt) {
+        if (state.activeConversationTab !== 'nip04') {
+            import('./ui.js').then(({ setNip04Unread }) => setNip04Unread(true));
+        }
+        if (state.currentChat !== peerPubkey || state.currentChatProtocol !== 'nip04') {
+            state.unreadNip04.add(peerPubkey);
+        }
+    }
     queueConversationsListUpdate();
     if (state.currentChat === peerPubkey && state.currentChatProtocol === 'nip04') {
-        queueActiveChatRender();
+        queueActiveChatRender(peerPubkey);
     }
 }
 

@@ -70,6 +70,14 @@
                 </div>
             </div>
 
+            <div class="conv-tabs" id="convTabs" hidden>
+                <button type="button" class="conv-tab conv-tab--active" id="tabNip17" onclick="switchConversationTab('nip17')">NIP-17</button>
+                <button type="button" class="conv-tab" id="tabNip04" onclick="switchConversationTab('nip04')">
+                    NIP-04
+                    <span class="conv-tab-dot" id="nip04UnreadDot" hidden aria-label="Unread messages"></span>
+                </button>
+            </div>
+
             <div class="conversations-list" id="conversationsList"></div>
             <div class="inbox-loading" id="inboxLoading" hidden>
                 <span class="loading" aria-hidden="true"></span>

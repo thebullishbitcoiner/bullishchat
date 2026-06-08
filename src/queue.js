@@ -41,8 +41,12 @@ export function queueActiveChatRender(pubkey, opts = {}) {
         state.activeChatRenderPubkey = null;
         state.activeChatRenderNeedsHeader = false;
         if (!target || state.currentChat !== target) return;
-        import('./ui.js').then(({ displayMessages, updateChatHeader }) => {
-            displayMessages(target);
+        import('./ui.js').then(({ displayMessages, displayNip04Messages, updateChatHeader }) => {
+            if (state.currentChatProtocol === 'nip04') {
+                displayNip04Messages(target);
+            } else {
+                displayMessages(target);
+            }
             if (shouldHeader) {
                 updateChatHeader(target);
             }
