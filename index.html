@@ -127,6 +127,14 @@
 
                 <div class="chat-input-container">
                     <div class="chat-input-shell">
+                        <div class="chat-image-preview" id="chatImagePreview" hidden>
+                            <div class="chat-image-preview-thumb-wrap">
+                                <img class="chat-image-preview-thumb" id="chatImagePreviewThumb" alt="" hidden>
+                                <span class="chat-image-preview-spinner loading" id="chatImagePreviewSpinner" aria-label="Uploading…"></span>
+                            </div>
+                            <span class="chat-image-preview-filename" id="chatImagePreviewFilename"></span>
+                            <button type="button" class="chat-image-preview-remove" id="chatImagePreviewRemove" aria-label="Remove attached image">×</button>
+                        </div>
                         <div class="chat-input-main">
                             <input type="file" id="imageFileInput" accept="image/*" style="display:none" aria-hidden="true">
                             <button type="button" class="image-upload-btn" id="imageUploadBtn" aria-label="Attach image" title="Attach image">

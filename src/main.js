@@ -14,6 +14,7 @@ import {
     subscribeToMessages,
     sendMessage,
     sendImageMessage,
+    clearPendingImage,
     subscribeToNip04Messages
 } from './messages.js';
 import {
@@ -272,6 +273,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 imageFileInput.value = '';
             }
         });
+    }
+
+    const imagePreviewRemove = document.getElementById('chatImagePreviewRemove');
+    if (imagePreviewRemove) {
+        imagePreviewRemove.addEventListener('click', () => clearPendingImage());
     }
 
     document.addEventListener('visibilitychange', () => {

@@ -53,6 +53,8 @@ export const state = {
     settingsRelayDraft: [],
     blossomServers: [...DEFAULT_BLOSSOM_SERVERS],
     settingsBlossomDraft: [],
+    pendingImageUrl: null,
+    pendingImageObjectUrl: null,
     customReactionEmojiSet: [],
     customReactionEmojiUrlMap: {},
     /** Latest merged catalog from relay discovery (filter in UI without re-fetching). */

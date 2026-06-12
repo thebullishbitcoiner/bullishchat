@@ -293,6 +293,7 @@ export function setMobileChatPanel(open) {
 }
 
 export function openChat(pubkey) {
+    import('./messages.js').then(({ clearPendingImage }) => clearPendingImage());
     state.currentChat = normalizePubkey(pubkey);
     state.currentChatProtocol = 'nip17';
     state.unreadNip17.delete(state.currentChat);
@@ -312,6 +313,7 @@ export function openChat(pubkey) {
 }
 
 export function openNip04Chat(pubkey) {
+    import('./messages.js').then(({ clearPendingImage }) => clearPendingImage());
     state.currentChat = normalizePubkey(pubkey);
     state.currentChatProtocol = 'nip04';
     state.unreadNip04.delete(state.currentChat);

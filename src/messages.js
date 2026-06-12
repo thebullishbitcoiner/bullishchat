@@ -872,16 +872,33 @@ export async function sendReactionToMessage(message, emoji) {
     }
 }
 
+export function clearPendingImage() {
+    if (state.pendingImageObjectUrl) {
+        URL.revokeObjectURL(state.pendingImageObjectUrl);
+        state.pendingImageObjectUrl = null;
+    }
+    state.pendingImageUrl = null;
+    const card = document.getElementById('chatImagePreview');
+    if (card) card.hidden = true;
+}
+
 export async function sendMessage() {
     const input = document.getElementById('messageInput');
     const sendBtn = document.getElementById('sendBtn');
-    const content = input.value.trim();
+    const textContent = input.value.trim();
+    const imageUrl = state.pendingImageUrl;
 
-    if (!content || !state.currentChat) return;
+    if (!textContent && !imageUrl) return;
+    if (!state.currentChat) return;
+
+    const content = imageUrl
+        ? (textContent ? `${textContent}\n${imageUrl}` : imageUrl)
+        : textContent;
 
     if (state.currentChatProtocol === 'nip04') {
         await sendNip04Message(state.currentChat, content);
         input.value = '';
+        clearPendingImage();
         return;
     }
 
@@ -919,6 +936,7 @@ export async function sendMessage() {
         displayMessages(state.currentChat);
         updateConversationsList();
         input.value = '';
+        clearPendingImage();
 
     } catch (error) {
         alert('Failed to send message: ' + error.message);
@@ -935,23 +953,37 @@ export async function sendImageMessage(file) {
         alert(`Image too large (max ${MAX_IMAGE_UPLOAD_BYTES / 1024 / 1024} MB).`);
         return;
     }
+
+    // Show card immediately with spinner while upload is in flight
+    const objectUrl = URL.createObjectURL(file);
+    state.pendingImageObjectUrl = objectUrl;
+
+    const card = document.getElementById('chatImagePreview');
+    const thumb = document.getElementById('chatImagePreviewThumb');
+    const spinner = document.getElementById('chatImagePreviewSpinner');
+    const filenameEl = document.getElementById('chatImagePreviewFilename');
     const sendBtn = document.getElementById('sendBtn');
-    if (sendBtn) {
-        sendBtn.disabled = true;
-        sendBtn.innerHTML = '<div class="loading"></div>';
-    }
+    const imageUploadBtn = document.getElementById('imageUploadBtn');
+
+    if (filenameEl) filenameEl.textContent = file.name;
+    if (thumb) thumb.hidden = true;
+    if (spinner) spinner.hidden = false;
+    if (card) card.hidden = false;
+    if (sendBtn) sendBtn.disabled = true;
+    if (imageUploadBtn) imageUploadBtn.disabled = true;
+
     try {
         const url = await uploadImageToNostr(file);
-        const input = document.getElementById('messageInput');
-        input.value = url;
-        await sendMessage();
+        state.pendingImageUrl = url;
+        // Swap spinner for thumbnail
+        if (thumb) { thumb.src = objectUrl; thumb.hidden = false; }
+        if (spinner) spinner.hidden = true;
+        if (sendBtn) sendBtn.disabled = false;
     } catch (e) {
+        clearPendingImage();
         alert('Upload failed: ' + e.message);
     } finally {
-        if (sendBtn) {
-            sendBtn.disabled = false;
-            sendBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>';
-        }
+        if (imageUploadBtn) imageUploadBtn.disabled = false;
     }
 }
 
