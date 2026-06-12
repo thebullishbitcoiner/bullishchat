@@ -1322,13 +1322,17 @@ body.is-authenticated .conversations-list {
 }
 
 .chat-image-preview {
-    display: flex;
+    display: none;
     align-items: center;
     gap: 10px;
     padding: 7px 10px;
     background: #1a1a1a;
     border: 1px solid #2a2a2a;
     border-bottom: none;
+}
+
+.chat-image-preview:not([hidden]) {
+    display: flex;
 }
 
 .chat-image-preview-thumb-wrap {
