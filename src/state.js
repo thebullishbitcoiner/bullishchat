@@ -1,4 +1,4 @@
-import { RELAY_URLS } from './constants.js';
+import { RELAY_URLS, DEFAULT_BLOSSOM_SERVERS } from './constants.js';
 
 export const state = {
     pool: null,
@@ -51,6 +51,8 @@ export const state = {
     gapFillLastRunMs: new Map(),
     isInboxLoading: false,
     settingsRelayDraft: [],
+    blossomServers: [...DEFAULT_BLOSSOM_SERVERS],
+    settingsBlossomDraft: [],
     customReactionEmojiSet: [],
     customReactionEmojiUrlMap: {},
     /** Latest merged catalog from relay discovery (filter in UI without re-fetching). */

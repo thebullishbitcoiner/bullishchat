@@ -1336,6 +1336,7 @@ body.is-authenticated .conversations-list {
     box-shadow: 0 0 0 1px var(--accent-soft);
 }
 
+.image-upload-btn,
 .emoji-toggle-btn {
     flex-shrink: 0;
     width: 48px;
@@ -1352,8 +1353,25 @@ body.is-authenticated .conversations-list {
     transition: background 0.15s ease;
 }
 
+.image-upload-btn svg {
+    width: 22px;
+    height: 22px;
+    fill: currentColor;
+    opacity: 0.7;
+}
+
+.image-upload-btn:hover,
 .emoji-toggle-btn:hover {
     background: #1a1a1a;
+}
+
+.image-upload-btn:hover svg {
+    opacity: 1;
+}
+
+.image-upload-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.4;
 }
 
 .emoji-toggle-btn[aria-expanded='true'] {

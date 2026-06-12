@@ -128,6 +128,10 @@
                 <div class="chat-input-container">
                     <div class="chat-input-shell">
                         <div class="chat-input-main">
+                            <input type="file" id="imageFileInput" accept="image/*" style="display:none" aria-hidden="true">
+                            <button type="button" class="image-upload-btn" id="imageUploadBtn" aria-label="Attach image" title="Attach image">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zm-8.5-5.5l2.5 3.01L18 12l3 4H5l3.5-4.5 2 2.5z"/></svg>
+                            </button>
                             <button type="button" class="emoji-toggle-btn" id="emojiToggleBtn" aria-label="Open emoji picker" aria-expanded="false" aria-controls="emojiPanel" title="Emoji">
                                 <span class="emoji-toggle-icon" aria-hidden="true">🧡</span>
                             </button>
@@ -183,6 +187,23 @@
                     <p class="modal-footnote" id="settingsRelayStatus" aria-live="polite"></p>
                     <div class="settings-actions">
                         <button type="button" class="btn settings-save-btn" id="settingsSaveBtn">Save relays</button>
+                    </div>
+                </div>
+            </details>
+            <details class="settings-section settings-section--blossom">
+                <summary class="settings-section-summary">
+                    <span class="settings-section-title">Blossom Upload Servers (kind 10063)</span>
+                </summary>
+                <div class="settings-section-body">
+                    <p class="settings-section-note">Images are uploaded to these servers in order. nostr.build is the automatic fallback. Saved as a kind 10063 event to your relays.</p>
+                    <div class="settings-relay-row">
+                        <input type="url" class="modal-search settings-relay-input" id="settingsBlossomInput" value="https://" placeholder="https://blossom.example.com" autocomplete="off" spellcheck="false" />
+                        <button type="button" class="settings-add-btn" id="settingsBlossomAddBtn">Add</button>
+                    </div>
+                    <div class="settings-relay-list" id="settingsBlossomList"></div>
+                    <p class="modal-footnote" id="settingsBlossomStatus" aria-live="polite"></p>
+                    <div class="settings-actions">
+                        <button type="button" class="btn settings-save-btn" id="settingsBlossomSaveBtn">Save servers</button>
                     </div>
                 </div>
             </details>

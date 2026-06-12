@@ -10,10 +10,12 @@ import {
     CUSTOM_REACTION_SET_KIND,
     CUSTOM_REACTION_SET_D_TAG,
     EMOJI_DISCOVERY_PAGE_LIMIT,
-    EMOJI_DISCOVERY_MAX_PAGES
+    EMOJI_DISCOVERY_MAX_PAGES,
+    DEFAULT_BLOSSOM_SERVERS,
+    BLOSSOM_SERVER_LIST_KIND
 } from './constants.js';
 import { idbPut } from './db.js';
-import { nostrAuthHandler, sortRelaysForRead, fetchKind10050Relays } from './relay.js';
+import { nostrAuthHandler, sortRelaysForRead, fetchKind10050Relays, fetchKind10063Servers } from './relay.js';
 import { getDisplayName, enrichDiscoverEmojiSetAuthors } from './profile.js';
 import {
     normalizeCustomEmojiLines,
@@ -68,6 +70,89 @@ export function renderSettingsRelayList() {
         row.appendChild(text);
         row.appendChild(rm);
         list.appendChild(row);
+    }
+}
+
+function normalizeBlossomUrl(raw) {
+    const t = (raw || '').trim();
+    if (!t) return null;
+    let u;
+    try {
+        u = new URL(t);
+    } catch {
+        return null;
+    }
+    if (u.protocol !== 'https:') return null;
+    u.hash = '';
+    u.search = '';
+    return u.toString().replace(/\/$/, '');
+}
+
+export function renderSettingsBlossomList() {
+    const list = document.getElementById('settingsBlossomList');
+    if (!list) return;
+    list.innerHTML = '';
+    if (!state.settingsBlossomDraft.length) {
+        list.innerHTML = '<div class="new-chat-suggestion-empty" role="status">No Blossom servers configured yet.</div>';
+        return;
+    }
+    for (const server of state.settingsBlossomDraft) {
+        const row = document.createElement('div');
+        row.className = 'settings-relay-item';
+        const text = document.createElement('div');
+        text.className = 'settings-relay-url';
+        text.textContent = server;
+        text.title = server;
+        const rm = document.createElement('button');
+        rm.type = 'button';
+        rm.className = 'settings-relay-remove';
+        rm.setAttribute('aria-label', `Remove server ${server}`);
+        rm.textContent = '×';
+        rm.addEventListener('click', () => {
+            state.settingsBlossomDraft = state.settingsBlossomDraft.filter((s) => s !== server);
+            renderSettingsBlossomList();
+        });
+        row.appendChild(text);
+        row.appendChild(rm);
+        list.appendChild(row);
+    }
+}
+
+export async function saveSettingsBlossomServers() {
+    const status = document.getElementById('settingsBlossomStatus');
+    const saveBtn = document.getElementById('settingsBlossomSaveBtn');
+    if (!state.pool || !state.publicKey) {
+        if (status) status.textContent = 'Connect first.';
+        return;
+    }
+    if (!state.settingsBlossomDraft.length) {
+        if (status) status.textContent = 'Add at least one server URL.';
+        return;
+    }
+    if (saveBtn) saveBtn.disabled = true;
+    if (status) status.textContent = 'Saving…';
+    try {
+        const ev = {
+            kind: BLOSSOM_SERVER_LIST_KIND,
+            created_at: Math.floor(Date.now() / 1000),
+            tags: state.settingsBlossomDraft.map((url) => ['server', url]),
+            content: ''
+        };
+        const signed = await window.nostr.signEvent(ev);
+        const targets = [...new Set([...state.dmRelayUrls, ...RELAY_URLS])];
+        const publishAttempts = targets.map(async (url) => {
+            await state.pool.publish([url], signed, { onauth: nostrAuthHandler });
+            return url;
+        });
+        await Promise.any(publishAttempts);
+        state.blossomServers = [...new Set(state.settingsBlossomDraft)];
+        void idbPut('meta', { key: 'blossomServers', value: state.blossomServers }).catch(() => {});
+        if (status) status.textContent = `Saved ${state.settingsBlossomDraft.length} server(s) as kind ${BLOSSOM_SERVER_LIST_KIND}.`;
+    } catch (err) {
+        if (status) status.textContent = 'Could not publish settings. Try again.';
+        console.error('Failed to save kind 10063 blossom servers:', err);
+    } finally {
+        if (saveBtn) saveBtn.disabled = false;
     }
 }
 
@@ -234,6 +319,16 @@ export async function openSettingsModal() {
     if (status) {
         status.textContent = 'Edit your DM inbox relays and save to publish kind 10050.';
     }
+
+    state.settingsBlossomDraft = await fetchKind10063Servers(state.publicKey);
+    if (!state.settingsBlossomDraft.length) {
+        state.settingsBlossomDraft = [...(state.blossomServers.length ? state.blossomServers : DEFAULT_BLOSSOM_SERVERS)];
+    }
+    renderSettingsBlossomList();
+    const blossomStatus = document.getElementById('settingsBlossomStatus');
+    if (blossomStatus) {
+        blossomStatus.textContent = 'Edit your Blossom upload servers and save to publish kind 10063.';
+    }
     if (input) {
         input.value = 'wss://';
         setTimeout(() => input.focus(), 30);
@@ -361,6 +456,40 @@ export function initSettingsUi() {
             void saveSettingsRelays();
         });
     }
+
+    const blossomAddBtn = document.getElementById('settingsBlossomAddBtn');
+    const blossomInput = document.getElementById('settingsBlossomInput');
+    const blossomSaveBtn = document.getElementById('settingsBlossomSaveBtn');
+    const blossomStatus = document.getElementById('settingsBlossomStatus');
+    if (blossomAddBtn && blossomInput) {
+        blossomAddBtn.addEventListener('click', () => {
+            const normalized = normalizeBlossomUrl(blossomInput.value);
+            if (!normalized) {
+                if (blossomStatus) blossomStatus.textContent = 'Enter a valid https:// server URL.';
+                return;
+            }
+            if (!state.settingsBlossomDraft.includes(normalized)) {
+                state.settingsBlossomDraft.push(normalized);
+                state.settingsBlossomDraft = [...new Set(state.settingsBlossomDraft)];
+                renderSettingsBlossomList();
+                if (blossomStatus) blossomStatus.textContent = '';
+            }
+            blossomInput.value = 'https://';
+            blossomInput.focus();
+        });
+        blossomInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                blossomAddBtn.click();
+            }
+        });
+    }
+    if (blossomSaveBtn) {
+        blossomSaveBtn.addEventListener('click', () => {
+            void saveSettingsBlossomServers();
+        });
+    }
+
     if (emojiSaveBtn) {
         emojiSaveBtn.addEventListener('click', async () => {
             const parsed = normalizeCustomEmojiLines(state.settingsEmojiDraftSet.join('\n'));

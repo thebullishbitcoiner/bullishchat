@@ -85,6 +85,24 @@ export async function resolveInboxRelays(authorPubkey) {
     return relays;
 }
 
+/** BUD-03 kind 10063: user's Blossom server list */
+export async function fetchKind10063Servers(authorPubkey) {
+    try {
+        const queryRelays = [...new Set([...(state.dmRelayUrls?.length ? state.dmRelayUrls : []), ...RELAY_URLS])];
+        const events = await state.pool.querySync(
+            queryRelays,
+            { kinds: [10063], authors: [authorPubkey], limit: 3 },
+            { maxWait: 9000, onauth: nostrAuthHandler }
+        );
+        const ev = (events || []).sort((a, b) => (b.created_at || 0) - (a.created_at || 0))[0];
+        if (!ev?.tags?.length) return [];
+        return ev.tags.filter((t) => t[0] === 'server' && typeof t[1] === 'string' && t[1].length > 0).map((t) => t[1]);
+    } catch (e) {
+        console.warn('fetchKind10063Servers failed:', e);
+        return [];
+    }
+}
+
 /** Read from both default + discovered inbox relays to reduce missed events on flaky/mobile sockets. */
 export function getReadRelayUrlsUnsorted() {
     return [...new Set([...(state.dmRelayUrls || []), ...RELAY_URLS])];

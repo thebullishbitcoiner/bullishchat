@@ -7,8 +7,10 @@ import {
     normalizePubkey,
     LIGHTNING_INVOICE_RE,
     HTTP_URL_IN_TEXT_RE,
-    RELAY_URLS
+    RELAY_URLS,
+    MAX_IMAGE_UPLOAD_BYTES
 } from './constants.js';
+import { uploadImageToNostr } from './blossom.js';
 import { dbMarkWrapSeen, dbSaveMessage, dbSaveNip04Message, dbMarkKind4Seen } from './db.js';
 import { getReadRelayUrls, getReadRelayUrlsUnsorted, resolveInboxRelays, getRandomPastTimestamp, nostrAuthHandler } from './relay.js';
 import { fetchUserProfile } from './profile.js';
@@ -924,6 +926,32 @@ export async function sendMessage() {
     } finally {
         sendBtn.disabled = false;
         sendBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>';
+    }
+}
+
+export async function sendImageMessage(file) {
+    if (!state.currentChat) return;
+    if (file.size > MAX_IMAGE_UPLOAD_BYTES) {
+        alert(`Image too large (max ${MAX_IMAGE_UPLOAD_BYTES / 1024 / 1024} MB).`);
+        return;
+    }
+    const sendBtn = document.getElementById('sendBtn');
+    if (sendBtn) {
+        sendBtn.disabled = true;
+        sendBtn.innerHTML = '<div class="loading"></div>';
+    }
+    try {
+        const url = await uploadImageToNostr(file);
+        const input = document.getElementById('messageInput');
+        input.value = url;
+        await sendMessage();
+    } catch (e) {
+        alert('Upload failed: ' + e.message);
+    } finally {
+        if (sendBtn) {
+            sendBtn.disabled = false;
+            sendBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>';
+        }
     }
 }
 

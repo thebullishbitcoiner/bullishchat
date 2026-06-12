@@ -88,12 +88,13 @@ export async function loadStateFromDB(ownerPubkey) {
         }
         await idbPut('meta', { key: 'ownerPubkey', value: ownerPubkey });
 
-        const [wrapRows, msgRows, profileRows, cursorRow, dmRelayRow] = await Promise.all([
+        const [wrapRows, msgRows, profileRows, cursorRow, dmRelayRow, blossomRow] = await Promise.all([
             idbGetAll('seenWraps'),
             idbGetAll('messages'),
             idbGetAll('profiles'),
             idbGet('meta', 'lastInboxGiftWrapProcessedSec'),
             idbGet('meta', 'dmRelayUrls'),
+            idbGet('meta', 'blossomServers'),
         ]);
 
         for (const { id } of wrapRows) {
@@ -124,6 +125,10 @@ export async function loadStateFromDB(ownerPubkey) {
         // can bootstrap from the user's own relay rather than only the app defaults.
         if (Array.isArray(dmRelayRow?.value) && dmRelayRow.value.length > 0) {
             state.dmRelayUrls = dmRelayRow.value;
+        }
+
+        if (Array.isArray(blossomRow?.value) && blossomRow.value.length > 0) {
+            state.blossomServers = blossomRow.value;
         }
 
         console.info(

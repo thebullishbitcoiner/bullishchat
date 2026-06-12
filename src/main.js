@@ -7,11 +7,13 @@ import { initDB, loadStateFromDB, loadNip04StateFromDB, idbPut } from './db.js';
 import {
     connectRelaySet,
     resolveInboxRelays,
+    fetchKind10063Servers,
 } from './relay.js';
 import { prefetchMissingConversationProfiles } from './profile.js';
 import {
     subscribeToMessages,
     sendMessage,
+    sendImageMessage,
     subscribeToNip04Messages
 } from './messages.js';
 import {
@@ -148,6 +150,15 @@ async function connectWithExtension() {
         await loadNip04StateFromDB(state.publicKey);
         updateConversationsList();
 
+        // Refresh blossom server list from kind 10063 so upload order matches what the user
+        // configured (potentially from another client), not just the stale IDB cache.
+        void fetchKind10063Servers(state.publicKey).then((servers) => {
+            if (servers.length) {
+                state.blossomServers = servers;
+                void idbPut('meta', { key: 'blossomServers', value: servers }).catch(() => {});
+            }
+        });
+
         setInboxLoading(true);
         await loadOwnCustomReactionSetFromNostr();
 
@@ -249,6 +260,19 @@ document.addEventListener('DOMContentLoaded', function() {
     initNewChatUi();
     initSettingsUi();
     initImageLightbox();
+
+    const imageFileInput = document.getElementById('imageFileInput');
+    const imageUploadBtn = document.getElementById('imageUploadBtn');
+    if (imageUploadBtn && imageFileInput) {
+        imageUploadBtn.addEventListener('click', () => imageFileInput.click());
+        imageFileInput.addEventListener('change', async () => {
+            const file = imageFileInput.files?.[0];
+            if (file) {
+                await sendImageMessage(file);
+                imageFileInput.value = '';
+            }
+        });
+    }
 
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') {

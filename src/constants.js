@@ -61,6 +61,14 @@ export const NIP04_HISTORY_LOOKBACK_SECS = 180 * 24 * 60 * 60;
  *  messages whose created_at was randomised below the stored cursor. */
 export const STARTUP_HISTORY_OVERLAP_SECS = 2 * 24 * 60 * 60;
 
+export const DEFAULT_BLOSSOM_SERVERS = [
+    'https://blossom.band',
+    'https://blossom.primal.net'
+];
+export const NOSTR_BUILD_UPLOAD_URL = 'https://nostr.build/api/v2/upload/files';
+export const MAX_IMAGE_UPLOAD_BYTES = 25 * 1024 * 1024;
+export const BLOSSOM_SERVER_LIST_KIND = 10063;
+
 /** Lowercase hex pubkey for stable Map keys and comparisons */
 export function normalizePubkey(pk) {
     if (!pk || typeof pk !== 'string') return '';
