@@ -57,6 +57,24 @@ export function idbPut(store, value) {
     });
 }
 
+/** Deletes every row in `store` matching `conversationPubkey` via the existing by-conv index. */
+export function idbDeleteConversationMessages(store, conversationPubkey) {
+    if (!state.db) return Promise.resolve();
+    return new Promise((resolve) => {
+        const tx = state.db.transaction(store, 'readwrite');
+        const req = tx.objectStore(store).index('by-conv').openCursor(IDBKeyRange.only(conversationPubkey));
+        req.onsuccess = (e) => {
+            const cursor = e.target.result;
+            if (cursor) {
+                cursor.delete();
+                cursor.continue();
+            }
+        };
+        tx.oncomplete = resolve;
+        tx.onerror = resolve;
+    });
+}
+
 export function idbGetAll(store) {
     if (!state.db) return Promise.resolve([]);
     return new Promise((resolve, reject) => {
@@ -88,13 +106,14 @@ export async function loadStateFromDB(ownerPubkey) {
         }
         await idbPut('meta', { key: 'ownerPubkey', value: ownerPubkey });
 
-        const [wrapRows, msgRows, profileRows, cursorRow, dmRelayRow, blossomRow] = await Promise.all([
+        const [wrapRows, msgRows, profileRows, cursorRow, dmRelayRow, blossomRow, mutedRow] = await Promise.all([
             idbGetAll('seenWraps'),
             idbGetAll('messages'),
             idbGetAll('profiles'),
             idbGet('meta', 'lastInboxGiftWrapProcessedSec'),
             idbGet('meta', 'dmRelayUrls'),
             idbGet('meta', 'blossomServers'),
+            idbGet('meta', 'mutedPubkeys'),
         ]);
 
         for (const { id } of wrapRows) {
@@ -129,6 +148,10 @@ export async function loadStateFromDB(ownerPubkey) {
 
         if (Array.isArray(blossomRow?.value) && blossomRow.value.length > 0) {
             state.blossomServers = blossomRow.value;
+        }
+
+        if (Array.isArray(mutedRow?.value) && mutedRow.value.length > 0) {
+            state.mutedPubkeys = new Set(mutedRow.value);
         }
 
         console.info(

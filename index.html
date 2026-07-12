@@ -174,92 +174,112 @@
         </div>
     </div>
 
-    <div id="settingsModal" class="modal-backdrop" hidden>
-        <div class="modal modal--settings" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle" tabindex="-1">
-            <div class="modal-header">
-                <h2 id="settingsModalTitle" class="modal-title">Settings</h2>
-                <button type="button" class="modal-close" id="settingsModalClose" aria-label="Close">×</button>
-            </div>
-            <div class="settings-scroll">
-            <details class="settings-section" open>
-                <summary class="settings-section-summary">
-                    <span class="settings-section-title">DM Inbox Relays (kind 10050)</span>
-                </summary>
-                <div class="settings-section-body">
-                    <p class="settings-section-note">These are the relays others should use to deliver your private messages.</p>
-                    <div class="settings-relay-row">
-                        <input type="url" class="modal-search settings-relay-input" id="settingsRelayInput" value="wss://" placeholder="wss://inbox.example.com" autocomplete="off" spellcheck="false" />
-                        <button type="button" class="settings-add-btn" id="settingsRelayAddBtn">Add</button>
-                    </div>
-                    <div class="settings-relay-list" id="settingsRelayList"></div>
-                    <p class="modal-footnote" id="settingsRelayStatus" aria-live="polite"></p>
-                    <div class="settings-actions">
-                        <button type="button" class="btn settings-save-btn" id="settingsSaveBtn">Save relays</button>
-                    </div>
-                </div>
-            </details>
-            <details class="settings-section settings-section--blossom">
-                <summary class="settings-section-summary">
-                    <span class="settings-section-title">Blossom Upload Servers (kind 10063)</span>
-                </summary>
-                <div class="settings-section-body">
-                    <p class="settings-section-note">Images are uploaded to these servers in order. nostr.build is the automatic fallback. Saved as a kind 10063 event to your relays.</p>
-                    <div class="settings-relay-row">
-                        <input type="url" class="modal-search settings-relay-input" id="settingsBlossomInput" value="https://" placeholder="https://blossom.example.com" autocomplete="off" spellcheck="false" />
-                        <button type="button" class="settings-add-btn" id="settingsBlossomAddBtn">Add</button>
-                    </div>
-                    <div class="settings-relay-list" id="settingsBlossomList"></div>
-                    <p class="modal-footnote" id="settingsBlossomStatus" aria-live="polite"></p>
-                    <div class="settings-actions">
-                        <button type="button" class="btn settings-save-btn" id="settingsBlossomSaveBtn">Save servers</button>
-                    </div>
-                </div>
-            </details>
-            <details class="settings-section settings-section--emoji" open>
-                <summary class="settings-section-summary">
-                    <span class="settings-section-heading">
-                        <span class="settings-section-title">My Emojis</span>
-                        <span class="settings-info-tip" tabindex="0" role="note" aria-label="Info: Quick picker uses the first 5 reactions. Use x on a tile to remove before saving." data-tip="Quick picker uses the first 5 reactions. Use × on a tile to remove before saving.">i</span>
+    <div id="settingsPage" class="settings-page" role="dialog" aria-modal="true" aria-labelledby="settingsPageTitle" hidden>
+        <header class="settings-page-header">
+            <button type="button" class="settings-back-btn" id="settingsBackBtn" aria-label="Back">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+            </button>
+            <h2 id="settingsPageTitle" class="settings-page-title">Settings</h2>
+        </header>
+        <div class="settings-page-scroll">
+            <nav class="settings-menu" id="settingsMenu" aria-label="Settings sections">
+                <button type="button" class="settings-menu-item" data-settings-section="relays">
+                    <span class="settings-menu-item-text">
+                        <span class="settings-menu-item-title">DM Inbox Relays</span>
+                        <span class="settings-menu-item-sub">Where others deliver your private messages · kind 10050</span>
                     </span>
-                </summary>
-                <div class="settings-section-body">
-                    <div class="settings-emoji-preview" id="settingsEmojiPreview"></div>
-                    <p class="modal-footnote" id="settingsEmojiStatus" aria-live="polite"></p>
-                    <div class="settings-actions settings-actions--split settings-emoji-actions">
-                        <button type="button" class="settings-add-btn settings-emoji-reset-btn" id="settingsEmojiResetBtn">Reset default</button>
-                        <button type="button" class="btn settings-save-btn settings-emoji-save-btn" id="settingsEmojiSaveBtn">Save emoji set</button>
-                    </div>
-                </div>
-            </details>
-            <details class="settings-section settings-section--emoji-discover">
-                <summary class="settings-section-summary">
-                    <span class="settings-section-heading">
-                        <span class="settings-section-title">Discover Emoji Sets</span>
-                        <span class="settings-info-tip" tabindex="0" role="note" aria-label="Info: Discovery queries relays once per app session on first expand." data-tip="The first expand in this app session queries relays for kind 30030 sets. Reopen/expand later reuses cached results until reload.">i</span>
+                    <span class="settings-menu-item-chevron" aria-hidden="true">›</span>
+                </button>
+                <button type="button" class="settings-menu-item" data-settings-section="blossom">
+                    <span class="settings-menu-item-text">
+                        <span class="settings-menu-item-title">Blossom Upload Servers</span>
+                        <span class="settings-menu-item-sub">Image upload servers, in order · kind 10063</span>
                     </span>
-                </summary>
-                <div class="settings-section-body">
-                    <div class="settings-emoji-discover-toolbar">
-                        <input type="search" class="modal-search settings-emoji-discover-search" id="settingsEmojiDiscoverSearch" placeholder="Filter by name, d tag, npub, or hex…" autocomplete="off" spellcheck="false" />
-                    </div>
-                    <div class="settings-relay-list settings-emoji-discover-list" id="settingsEmojiDiscoverList"></div>
-                    <p class="modal-footnote" id="settingsEmojiDiscoverStatus" aria-live="polite"></p>
+                    <span class="settings-menu-item-chevron" aria-hidden="true">›</span>
+                </button>
+                <button type="button" class="settings-menu-item" data-settings-section="muted">
+                    <span class="settings-menu-item-text">
+                        <span class="settings-menu-item-title">Muted Users</span>
+                        <span class="settings-menu-item-sub">Hidden from both tabs · kind 10000</span>
+                    </span>
+                    <span class="settings-menu-item-chevron" aria-hidden="true">›</span>
+                </button>
+                <button type="button" class="settings-menu-item" data-settings-section="emoji">
+                    <span class="settings-menu-item-text">
+                        <span class="settings-menu-item-title">My Emojis</span>
+                        <span class="settings-menu-item-sub">Your reaction set · kind 10030</span>
+                    </span>
+                    <span class="settings-menu-item-chevron" aria-hidden="true">›</span>
+                </button>
+                <button type="button" class="settings-menu-item" data-settings-section="discover">
+                    <span class="settings-menu-item-text">
+                        <span class="settings-menu-item-title">Discover Emoji Sets</span>
+                        <span class="settings-menu-item-sub">Browse public reaction sets from relays</span>
+                    </span>
+                    <span class="settings-menu-item-chevron" aria-hidden="true">›</span>
+                </button>
+                <button type="button" class="settings-menu-item" data-settings-section="sync">
+                    <span class="settings-menu-item-text">
+                        <span class="settings-menu-item-title">Inbox Sync</span>
+                        <span class="settings-menu-item-sub">Re-fetch messages if something looks stale</span>
+                    </span>
+                    <span class="settings-menu-item-chevron" aria-hidden="true">›</span>
+                </button>
+            </nav>
+            <section class="settings-subpage" id="settingsSubpage-relays" hidden>
+                <p class="settings-section-note">These are the relays others should use to deliver your private messages.</p>
+                <div class="settings-relay-row">
+                    <input type="url" class="modal-search settings-relay-input" id="settingsRelayInput" value="wss://" placeholder="wss://inbox.example.com" autocomplete="off" spellcheck="false" />
+                    <button type="button" class="settings-add-btn" id="settingsRelayAddBtn">Add</button>
                 </div>
-            </details>
-            <details class="settings-section settings-section--sync">
-                <summary class="settings-section-summary">
-                    <span class="settings-section-title">Inbox sync</span>
-                </summary>
-                <div class="settings-section-body">
-                    <p class="settings-section-note">Re-fetch gift wraps from relays if messages or reactions look incomplete or stale.</p>
-                    <div class="settings-actions settings-actions--split">
-                        <button type="button" class="btn settings-save-btn" id="settingsSyncNowBtn">Sync now</button>
-                        <button type="button" class="settings-add-btn settings-sync-log-btn" id="settingsSyncLogBtn">Log sync stats</button>
-                    </div>
-                    <p class="modal-footnote" id="settingsSyncStatus" aria-live="polite"></p>
+                <div class="settings-relay-list" id="settingsRelayList"></div>
+                <p class="modal-footnote" id="settingsRelayStatus" aria-live="polite"></p>
+                <div class="settings-actions">
+                    <button type="button" class="btn settings-save-btn" id="settingsSaveBtn">Save relays</button>
                 </div>
-            </details>
-            </div>
+            </section>
+            <section class="settings-subpage" id="settingsSubpage-blossom" hidden>
+                <p class="settings-section-note">Images are uploaded to these servers in order. nostr.build is the automatic fallback. Saved as a kind 10063 event to your relays.</p>
+                <div class="settings-relay-row">
+                    <input type="url" class="modal-search settings-relay-input" id="settingsBlossomInput" value="https://" placeholder="https://blossom.example.com" autocomplete="off" spellcheck="false" />
+                    <button type="button" class="settings-add-btn" id="settingsBlossomAddBtn">Add</button>
+                </div>
+                <div class="settings-relay-list" id="settingsBlossomList"></div>
+                <p class="modal-footnote" id="settingsBlossomStatus" aria-live="polite"></p>
+                <div class="settings-actions">
+                    <button type="button" class="btn settings-save-btn" id="settingsBlossomSaveBtn">Save servers</button>
+                </div>
+            </section>
+            <section class="settings-subpage" id="settingsSubpage-muted" hidden>
+                <p class="settings-section-note">Muted users' messages are hidden from both tabs. Saved privately (NIP-44 encrypted) as a kind 10000 event to your relays. Entries added by other clients are preserved.</p>
+                <div class="settings-relay-list" id="settingsMutedList"></div>
+                <p class="modal-footnote" id="settingsMutedStatus" aria-live="polite"></p>
+            </section>
+            <section class="settings-subpage" id="settingsSubpage-emoji" hidden>
+                <p class="settings-section-note">Quick picker uses the first 5 reactions. Use × on a tile to remove before saving.</p>
+                <div class="settings-emoji-preview" id="settingsEmojiPreview"></div>
+                <p class="modal-footnote" id="settingsEmojiStatus" aria-live="polite"></p>
+                <div class="settings-actions settings-actions--split settings-emoji-actions">
+                    <button type="button" class="settings-add-btn settings-emoji-reset-btn" id="settingsEmojiResetBtn">Reset default</button>
+                    <button type="button" class="btn settings-save-btn settings-emoji-save-btn" id="settingsEmojiSaveBtn">Save emoji set</button>
+                </div>
+            </section>
+            <section class="settings-subpage" id="settingsSubpage-discover" hidden>
+                <p class="settings-section-note">The first visit in this app session queries relays for kind 30030 sets. Later visits reuse cached results until reload.</p>
+                <div class="settings-emoji-discover-toolbar">
+                    <input type="search" class="modal-search settings-emoji-discover-search" id="settingsEmojiDiscoverSearch" placeholder="Filter by name, d tag, npub, or hex…" autocomplete="off" spellcheck="false" />
+                </div>
+                <div class="settings-relay-list settings-emoji-discover-list" id="settingsEmojiDiscoverList"></div>
+                <p class="modal-footnote" id="settingsEmojiDiscoverStatus" aria-live="polite"></p>
+            </section>
+            <section class="settings-subpage" id="settingsSubpage-sync" hidden>
+                <p class="settings-section-note">Re-fetch gift wraps from relays if messages or reactions look incomplete or stale.</p>
+                <div class="settings-actions settings-actions--split">
+                    <button type="button" class="btn settings-save-btn" id="settingsSyncNowBtn">Sync now</button>
+                    <button type="button" class="settings-add-btn settings-sync-log-btn" id="settingsSyncLogBtn">Log sync stats</button>
+                </div>
+                <p class="modal-footnote" id="settingsSyncStatus" aria-live="polite"></p>
+            </section>
         </div>
     </div>
 

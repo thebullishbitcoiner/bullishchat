@@ -11,7 +11,7 @@ import {
     MAX_IMAGE_UPLOAD_BYTES
 } from './constants.js';
 import { uploadImageToNostr } from './blossom.js';
-import { dbMarkWrapSeen, dbSaveMessage, dbSaveNip04Message, dbMarkKind4Seen } from './db.js';
+import { dbMarkWrapSeen, dbSaveMessage, dbSaveNip04Message, dbMarkKind4Seen, idbDeleteConversationMessages } from './db.js';
 import { getReadRelayUrls, getReadRelayUrlsUnsorted, resolveInboxRelays, getRandomPastTimestamp, nostrAuthHandler } from './relay.js';
 import { fetchUserProfile } from './profile.js';
 import { queueActiveChatRender, queueConversationsListUpdate, queueChatHeaderUpdate } from './queue.js';
@@ -539,6 +539,9 @@ export async function handleGiftWrappedMessage(giftWrap, options = {}) {
                 console.error('Outgoing rumor missing p tag; cannot assign conversation');
                 return;
             }
+            if (state.mutedPubkeys.has(conversationPubkey)) {
+                return;
+            }
 
             if (!state.conversations[conversationPubkey]) {
                 state.conversations[conversationPubkey] = [];
@@ -1006,6 +1009,7 @@ export async function handleKind4Event(event) {
         ? (event.tags.find(t => t[0] === 'p')?.[1] ?? null)
         : event.pubkey;
     if (!peerPubkey) return;
+    if (state.mutedPubkeys.has(normalizePubkey(peerPubkey))) return;
 
     let content;
     try {
@@ -1104,4 +1108,38 @@ export function subscribeToNip04Messages() {
         onevent: onEvent,
     });
     state.kind4Subscription = [subReceived, subSent];
+}
+
+/**
+ * Clears local history for one peer on one protocol only (does not mute — if they message
+ * again later a fresh conversation starts). Does not touch seenGiftWrapEventIds/seenRumorIds/
+ * seenKind4EventIds, so a resync won't resurrect the deleted messages (already-seen event ids
+ * are dropped at the top of handleGiftWrappedMessage/handleKind4Event).
+ */
+export async function deleteConversationLocal(pubkey, protocol) {
+    const isNip04 = protocol === 'nip04';
+    const store = isNip04 ? state.nip04Conversations : state.conversations;
+    delete store[pubkey];
+    const unreadSet = isNip04 ? state.unreadNip04 : state.unreadNip17;
+    unreadSet.delete(pubkey);
+
+    if (state.currentChat === pubkey && (isNip04 ? state.currentChatProtocol === 'nip04' : state.currentChatProtocol !== 'nip04')) {
+        state.currentChat = null;
+        state.currentChatProtocol = null;
+        const emptyState = document.getElementById('emptyState');
+        if (emptyState) emptyState.style.display = 'flex';
+        const chatView = document.getElementById('chatView');
+        if (chatView) chatView.style.display = 'none';
+        const { setMobileChatPanel, isMobileLayout } = await import('./ui.js');
+        if (isMobileLayout()) setMobileChatPanel(false);
+    }
+
+    const itemEls = isNip04 ? state.nip04ConversationItemEls : state.conversationItemEls;
+    const row = itemEls.get(pubkey);
+    if (row) { row.item.remove(); itemEls.delete(pubkey); }
+
+    await idbDeleteConversationMessages(isNip04 ? 'nip04Messages' : 'messages', pubkey);
+
+    const { updateConversationsList } = await import('./ui.js');
+    updateConversationsList();
 }

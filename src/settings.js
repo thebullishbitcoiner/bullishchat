@@ -8,7 +8,7 @@ import {
     DEFAULT_EXTRA_REACTIONS,
     MAX_CUSTOM_REACTION_EMOJIS,
     CUSTOM_REACTION_SET_KIND,
-    CUSTOM_REACTION_SET_D_TAG,
+    USER_EMOJI_LIST_KIND,
     EMOJI_DISCOVERY_PAGE_LIMIT,
     EMOJI_DISCOVERY_MAX_PAGES,
     DEFAULT_BLOSSOM_SERVERS,
@@ -16,13 +16,14 @@ import {
 } from './constants.js';
 import { idbPut } from './db.js';
 import { nostrAuthHandler, sortRelaysForRead, fetchKind10050Relays, fetchKind10063Servers } from './relay.js';
-import { getDisplayName, enrichDiscoverEmojiSetAuthors } from './profile.js';
+import { getDisplayName, fetchUserProfile, enrichDiscoverEmojiSetAuthors } from './profile.js';
 import {
     normalizeCustomEmojiLines,
     emojiShortcodeFromToken,
     getTagValue,
     syncBodyOverlayLock,
-    displayMessages
+    displayMessages,
+    createAvatarNode
 } from './ui.js';
 import { updateSettingsSyncUiState, runManualInboxSyncNow, logSyncTelemetrySnapshot } from './sync.js';
 
@@ -118,6 +119,46 @@ export function renderSettingsBlossomList() {
     }
 }
 
+export function renderSettingsMutedList() {
+    const list = document.getElementById('settingsMutedList');
+    if (!list) return;
+    list.innerHTML = '';
+    if (!state.mutedPubkeys.size) {
+        list.innerHTML = '<div class="new-chat-suggestion-empty" role="status">No muted users.</div>';
+        return;
+    }
+    for (const pubkey of state.mutedPubkeys) {
+        const row = document.createElement('div');
+        row.className = 'settings-relay-item settings-muted-item';
+        const avatar = createAvatarNode(pubkey, 'avatar settings-muted-avatar');
+        row.appendChild(avatar);
+        const text = document.createElement('div');
+        text.className = 'settings-relay-url';
+        text.textContent = getDisplayName(pubkey);
+        text.title = pubkey;
+        const rm = document.createElement('button');
+        rm.type = 'button';
+        rm.className = 'settings-relay-remove';
+        rm.setAttribute('aria-label', `Unmute ${getDisplayName(pubkey)}`);
+        rm.textContent = '×';
+        rm.addEventListener('click', async () => {
+            rm.disabled = true;
+            const { unmuteConversation } = await import('./mute.js');
+            await unmuteConversation(pubkey);
+            renderSettingsMutedList();
+            const status = document.getElementById('settingsMutedStatus');
+            if (status) status.textContent = 'Unmuted.';
+        });
+        row.appendChild(text);
+        row.appendChild(rm);
+        list.appendChild(row);
+
+        if (!state.userProfiles[pubkey]) {
+            void fetchUserProfile(pubkey).then(() => renderSettingsMutedList());
+        }
+    }
+}
+
 export async function saveSettingsBlossomServers() {
     const status = document.getElementById('settingsBlossomStatus');
     const saveBtn = document.getElementById('settingsBlossomSaveBtn');
@@ -132,11 +173,12 @@ export async function saveSettingsBlossomServers() {
     if (saveBtn) saveBtn.disabled = true;
     if (status) status.textContent = 'Saving…';
     try {
+        const foreignTags = (state.ownKind10063Event?.tags || []).filter((t) => t[0] !== 'server');
         const ev = {
             kind: BLOSSOM_SERVER_LIST_KIND,
             created_at: Math.floor(Date.now() / 1000),
-            tags: state.settingsBlossomDraft.map((url) => ['server', url]),
-            content: ''
+            tags: [...foreignTags, ...state.settingsBlossomDraft.map((url) => ['server', url])],
+            content: state.ownKind10063Event?.content || ''
         };
         const signed = await window.nostr.signEvent(ev);
         const targets = [...new Set([...state.dmRelayUrls, ...RELAY_URLS])];
@@ -145,6 +187,7 @@ export async function saveSettingsBlossomServers() {
             return url;
         });
         await Promise.any(publishAttempts);
+        state.ownKind10063Event = signed;
         state.blossomServers = [...new Set(state.settingsBlossomDraft)];
         void idbPut('meta', { key: 'blossomServers', value: state.blossomServers }).catch(() => {});
         if (status) status.textContent = `Saved ${state.settingsBlossomDraft.length} server(s) as kind ${BLOSSOM_SERVER_LIST_KIND}.`;
@@ -293,46 +336,116 @@ export function renderSettingsEmojiPreview(emojis) {
     }
 }
 
-export async function openSettingsModal() {
-    const modal = document.getElementById('settingsModal');
+const SETTINGS_SECTION_TITLES = {
+    relays: 'DM Inbox Relays',
+    blossom: 'Blossom Upload Servers',
+    muted: 'Muted Users',
+    emoji: 'My Emojis',
+    discover: 'Discover Emoji Sets',
+    sync: 'Inbox Sync'
+};
+
+let activeSettingsSection = null;
+
+export function openSettingsPage() {
+    const page = document.getElementById('settingsPage');
+    if (!page || !state.publicKey) return;
+    page.hidden = false;
+    // Discover's add-to-set flow edits this draft even if the My Emojis page was never opened.
+    state.settingsEmojiDraftSet = state.customReactionEmojiSet.length
+        ? [...state.customReactionEmojiSet]
+        : [...DEFAULT_QUICK_REACTIONS, ...DEFAULT_EXTRA_REACTIONS];
+    showSettingsSection(null);
+    syncBodyOverlayLock();
+}
+
+export function closeSettingsPage() {
+    const page = document.getElementById('settingsPage');
+    if (page) page.hidden = true;
+    activeSettingsSection = null;
+    syncBodyOverlayLock();
+}
+
+/** Back one level: section page → menu, menu → close settings. */
+export function settingsPageBack() {
+    if (activeSettingsSection) {
+        showSettingsSection(null);
+    } else {
+        closeSettingsPage();
+    }
+}
+
+export function showSettingsSection(name) {
+    activeSettingsSection = name;
+    const menu = document.getElementById('settingsMenu');
+    if (menu) menu.hidden = Boolean(name);
+    document.querySelectorAll('.settings-subpage').forEach((el) => {
+        el.hidden = el.id !== `settingsSubpage-${name}`;
+    });
+    const title = document.getElementById('settingsPageTitle');
+    if (title) title.textContent = name ? SETTINGS_SECTION_TITLES[name] : 'Settings';
+    const scroll = document.querySelector('.settings-page-scroll');
+    if (scroll) scroll.scrollTop = 0;
+
+    if (name === 'relays') void loadSettingsRelaysSection();
+    else if (name === 'blossom') void loadSettingsBlossomSection();
+    else if (name === 'muted') void loadSettingsMutedSection();
+    else if (name === 'emoji') void loadSettingsEmojiSection();
+    else if (name === 'discover') loadSettingsDiscoverSection();
+    else if (name === 'sync') loadSettingsSyncSection();
+}
+
+async function loadSettingsRelaysSection() {
     const input = document.getElementById('settingsRelayInput');
     const status = document.getElementById('settingsRelayStatus');
-    const emojiStatus = document.getElementById('settingsEmojiStatus');
-    const discoverStatus = document.getElementById('settingsEmojiDiscoverStatus');
-    if (!modal || !state.publicKey) return;
-    modal.hidden = false;
-    const collapsibles = modal.querySelectorAll('.settings-section');
-    collapsibles.forEach((section) => {
-        if (section instanceof HTMLDetailsElement) {
-            section.open = false;
-        }
-    });
-    syncBodyOverlayLock();
-    renderSettingsEmojiLoading();
-    if (emojiStatus) emojiStatus.textContent = 'Loading your emoji set…';
-    await loadOwnCustomReactionSetFromNostr();
+    const list = document.getElementById('settingsRelayList');
+    if (input) input.value = 'wss://';
+    if (status) status.textContent = '';
+    if (list) list.innerHTML = '<div class="new-chat-suggestion-empty" role="status">Loading relays…</div>';
     state.settingsRelayDraft = await fetchKind10050Relays(state.publicKey);
     if (!state.settingsRelayDraft.length) {
         state.settingsRelayDraft = [...RELAY_URLS];
     }
+    if (activeSettingsSection !== 'relays') return;
     renderSettingsRelayList();
-    if (status) {
-        status.textContent = 'Edit your DM inbox relays and save to publish kind 10050.';
-    }
+    if (status) status.textContent = 'Edit your DM inbox relays and save to publish kind 10050.';
+}
 
+async function loadSettingsBlossomSection() {
+    const input = document.getElementById('settingsBlossomInput');
+    const status = document.getElementById('settingsBlossomStatus');
+    const list = document.getElementById('settingsBlossomList');
+    if (input) input.value = 'https://';
+    if (status) status.textContent = '';
+    if (list) list.innerHTML = '<div class="new-chat-suggestion-empty" role="status">Loading servers…</div>';
     state.settingsBlossomDraft = await fetchKind10063Servers(state.publicKey);
     if (!state.settingsBlossomDraft.length) {
         state.settingsBlossomDraft = [...(state.blossomServers.length ? state.blossomServers : DEFAULT_BLOSSOM_SERVERS)];
     }
+    if (activeSettingsSection !== 'blossom') return;
     renderSettingsBlossomList();
-    const blossomStatus = document.getElementById('settingsBlossomStatus');
-    if (blossomStatus) {
-        blossomStatus.textContent = 'Edit your Blossom upload servers and save to publish kind 10063.';
-    }
-    if (input) {
-        input.value = 'wss://';
-        setTimeout(() => input.focus(), 30);
-    }
+    if (status) status.textContent = 'Edit your Blossom upload servers and save to publish kind 10063.';
+}
+
+async function loadSettingsMutedSection() {
+    // Render the cached list immediately, then refresh from relays so edits merge
+    // against the newest event (mutes may have been added from another client).
+    renderSettingsMutedList();
+    const status = document.getElementById('settingsMutedStatus');
+    if (status) status.textContent = 'Checking relays for updates…';
+    const { loadMuteListFromNostr } = await import('./mute.js');
+    await loadMuteListFromNostr();
+    if (activeSettingsSection !== 'muted') return;
+    renderSettingsMutedList();
+    if (status) status.textContent = '';
+}
+
+async function loadSettingsEmojiSection() {
+    const emojiStatus = document.getElementById('settingsEmojiStatus');
+    renderSettingsEmojiLoading();
+    if (emojiStatus) emojiStatus.textContent = 'Loading your emoji set…';
+    await loadOwnCustomReactionSetFromNostr();
+    if (activeSettingsSection !== 'emoji') return;
     state.settingsEmojiDraftSet = state.customReactionEmojiSet.length
         ? [...state.customReactionEmojiSet]
         : [...DEFAULT_QUICK_REACTIONS, ...DEFAULT_EXTRA_REACTIONS];
@@ -342,26 +455,32 @@ export async function openSettingsModal() {
             ? `Loaded ${state.customReactionEmojiSet.length} custom emojis from Nostr.`
             : 'No custom set on Nostr. Using default emoji set.';
     }
+}
+
+function loadSettingsDiscoverSection() {
+    const discoverStatus = document.getElementById('settingsEmojiDiscoverStatus');
+    const discoverSearch = document.getElementById('settingsEmojiDiscoverSearch');
+    state.emojiDiscoverDetailSet = null;
+    if (discoverSearch) discoverSearch.value = '';
+    if (!state.emojiDiscoverQueriedThisModalOpen) {
+        state.emojiDiscoverQueriedThisModalOpen = true;
+        void discoverEmojiSets();
+        return;
+    }
+    renderDiscoveredEmojiSets();
     if (discoverStatus) {
         discoverStatus.textContent = state.emojiDiscoverCatalog.length
-            ? `${state.emojiDiscoverCatalog.length} set(s) cached. Discover relays were already queried this session.`
-            : 'Expand Discover Emoji Sets once to query relays (runs once per app session).';
+            ? `${state.emojiDiscoverCatalog.length} set(s) cached from earlier this session.`
+            : 'No emoji sets found earlier this session.';
     }
-    state.emojiDiscoverDetailSet = null;
-    const discoverSearch = document.getElementById('settingsEmojiDiscoverSearch');
-    if (discoverSearch) discoverSearch.value = '';
-    renderDiscoveredEmojiSets();
+}
+
+function loadSettingsSyncSection() {
     const syncStatus = document.getElementById('settingsSyncStatus');
     if (syncStatus && !state.manualInboxSyncInFlight) {
         syncStatus.textContent = '';
     }
     updateSettingsSyncUiState();
-}
-
-export function closeSettingsModal() {
-    const modal = document.getElementById('settingsModal');
-    if (modal) modal.hidden = true;
-    syncBodyOverlayLock();
 }
 
 export async function saveSettingsRelays() {
@@ -378,11 +497,13 @@ export async function saveSettingsRelays() {
     if (saveBtn) saveBtn.disabled = true;
     if (status) status.textContent = 'Saving…';
     try {
+        // Carry over anything another client put in the event that isn't the relay list itself.
+        const foreignTags = (state.ownKind10050Event?.tags || []).filter((t) => t[0] !== 'relay');
         const ev = {
             kind: 10050,
             created_at: Math.floor(Date.now() / 1000),
-            tags: state.settingsRelayDraft.map((url) => ['relay', url]),
-            content: ''
+            tags: [...foreignTags, ...state.settingsRelayDraft.map((url) => ['relay', url])],
+            content: state.ownKind10050Event?.content || ''
         };
         const signed = await window.nostr.signEvent(ev);
         const targets = [...new Set([...state.dmRelayUrls, ...RELAY_URLS, ...state.settingsRelayDraft])];
@@ -391,6 +512,7 @@ export async function saveSettingsRelays() {
             return url;
         });
         await Promise.any(publishAttempts);
+        state.ownKind10050Event = signed;
         state.dmRelayUrls = [...new Set(state.settingsRelayDraft)];
         void idbPut('meta', { key: 'dmRelayUrls', value: state.dmRelayUrls }).catch(() => {});
         if (status) status.textContent = `Saved ${state.settingsRelayDraft.length} relay(s).`;
@@ -404,8 +526,8 @@ export async function saveSettingsRelays() {
 
 export function initSettingsUi() {
     const btn = document.getElementById('sidebarSettingsBtn');
-    const modal = document.getElementById('settingsModal');
-    const close = document.getElementById('settingsModalClose');
+    const backBtn = document.getElementById('settingsBackBtn');
+    const menu = document.getElementById('settingsMenu');
     const addBtn = document.getElementById('settingsRelayAddBtn');
     const input = document.getElementById('settingsRelayInput');
     const saveBtn = document.getElementById('settingsSaveBtn');
@@ -417,16 +539,17 @@ export function initSettingsUi() {
 
     if (btn) {
         btn.addEventListener('click', () => {
-            void openSettingsModal();
+            openSettingsPage();
         });
     }
-    if (modal) {
-        modal.addEventListener('click', (e) => {
-            if (e.target === modal) closeSettingsModal();
-        });
+    if (backBtn) {
+        backBtn.addEventListener('click', settingsPageBack);
     }
-    if (close) {
-        close.addEventListener('click', closeSettingsModal);
+    if (menu) {
+        menu.addEventListener('click', (e) => {
+            const item = e.target.closest('[data-settings-section]');
+            if (item) showSettingsSection(item.dataset.settingsSection);
+        });
     }
     if (addBtn && input) {
         addBtn.addEventListener('click', () => {
@@ -541,15 +664,6 @@ export function initSettingsUi() {
                 state.emojiDiscoverSearchDebounce = null;
                 renderDiscoveredEmojiSets();
             }, 150);
-        });
-    }
-    const emojiDiscoverSection = document.querySelector('.settings-section--emoji-discover');
-    if (emojiDiscoverSection instanceof HTMLDetailsElement) {
-        emojiDiscoverSection.addEventListener('toggle', () => {
-            if (emojiDiscoverSection.open && !state.emojiDiscoverQueriedThisModalOpen) {
-                state.emojiDiscoverQueriedThisModalOpen = true;
-                void discoverEmojiSets();
-            }
         });
     }
     const syncNowBtn = document.getElementById('settingsSyncNowBtn');
@@ -691,6 +805,29 @@ export async function discoverEmojiSets() {
     }
 }
 
+/** Appends unseen tokens from extra into base; base's order and URLs win on conflict. */
+function mergeEmojiMeta(base, extra) {
+    const seen = new Set(base.emojis);
+    for (const token of extra.emojis) {
+        if (!seen.has(token)) {
+            base.emojis.push(token);
+            seen.add(token);
+        }
+    }
+    base.urlMap = { ...extra.urlMap, ...base.urlMap };
+}
+
+/** 'a' tags pointing at kind 30030 emoji sets, from either the public tags or the private items. */
+function extractEmojiSetRefs(tagList) {
+    return (Array.isArray(tagList) ? tagList : [])
+        .filter((t) => Array.isArray(t) && t[0] === 'a' && typeof t[1] === 'string' && t[1].startsWith(`${CUSTOM_REACTION_SET_KIND}:`))
+        .map((t) => {
+            const [, pk, ...rest] = t[1].split(':');
+            return { pubkey: normalizePubkey(pk), d: rest.join(':') };
+        })
+        .filter((r) => r.pubkey);
+}
+
 export async function loadOwnCustomReactionSetFromNostr() {
     if (!state.pool || !state.publicKey) {
         state.customReactionEmojiSet = [];
@@ -698,20 +835,88 @@ export async function loadOwnCustomReactionSetFromNostr() {
     }
     try {
         const relays = [...new Set([...(state.dmRelayUrls?.length ? state.dmRelayUrls : []), ...RELAY_URLS])];
-        const events = await state.pool.querySync(
+        const newestOf = (evs) => (evs || []).sort((a, b) => (b.created_at || 0) - (a.created_at || 0))[0];
+        const emojiListEvents = await state.pool.querySync(
             relays,
-            {
-                kinds: [CUSTOM_REACTION_SET_KIND],
-                authors: [state.publicKey],
-                '#d': [CUSTOM_REACTION_SET_D_TAG],
-                limit: 5
-            },
+            { kinds: [USER_EMOJI_LIST_KIND], authors: [state.publicKey], limit: 5 },
             { maxWait: 9000, onauth: nostrAuthHandler }
         );
-        const newest = (events || []).sort((a, b) => (b.created_at || 0) - (a.created_at || 0))[0];
-        const parsedSet = parseCustomReactionSetMeta(newest);
-        state.customReactionEmojiSet = parsedSet.emojis;
-        state.customReactionEmojiUrlMap = parsedSet.urlMap;
+
+        const merged = { emojis: [], urlMap: {} };
+
+        // NIP-51 kind 10030 user emoji list: public + private emoji entries, then any
+        // referenced kind 30030 sets ('a' tags in either half).
+        const emojiList = newestOf(emojiListEvents);
+        state.ownKind10030Event = emojiList || null;
+        state.ownKind10030PrivateItems = [];
+        state.ownKind10030ContentUnreadable = false;
+        if (emojiList) {
+            // Only merge tag-derived entries — the content-fallback parser would turn
+            // an encrypted private list into garbage tokens.
+            if ((emojiList.tags || []).some((t) => t[0] === 'emoji')) {
+                mergeEmojiMeta(merged, parseCustomReactionSetMeta(emojiList));
+            }
+
+            // Private half: a JSON tag-array encrypted to self (NIP-44, or legacy NIP-04
+            // detected by its '?iv=' suffix).
+            if (emojiList.content) {
+                try {
+                    const decrypted = emojiList.content.includes('?iv=') && window.nostr?.nip04?.decrypt
+                        ? await window.nostr.nip04.decrypt(state.publicKey, emojiList.content)
+                        : await window.nostr.nip44.decrypt(state.publicKey, emojiList.content);
+                    const parsed = JSON.parse(decrypted);
+                    if (Array.isArray(parsed)) {
+                        state.ownKind10030PrivateItems = parsed;
+                        mergeEmojiMeta(merged, parseCustomReactionSetMeta({ tags: parsed, content: '' }));
+                    } else {
+                        state.ownKind10030ContentUnreadable = true;
+                    }
+                } catch (e) {
+                    state.ownKind10030ContentUnreadable = true;
+                    console.warn('Emoji list (kind 10030) content could not be decrypted — private entries will be preserved verbatim:', e);
+                }
+            }
+
+            const seenRefs = new Set();
+            const refs = [
+                ...extractEmojiSetRefs(emojiList.tags),
+                ...extractEmojiSetRefs(state.ownKind10030PrivateItems)
+            ].filter((r) => {
+                const key = `${r.pubkey}:${r.d}`;
+                if (seenRefs.has(key)) return false;
+                seenRefs.add(key);
+                return true;
+            });
+
+            console.info(
+                `Emoji list (kind 10030): ${(emojiList.tags || []).filter((t) => t[0] === 'emoji').length} public emoji tag(s), ` +
+                `${state.ownKind10030PrivateItems.filter((t) => t[0] === 'emoji').length} private emoji item(s), ${refs.length} set ref(s); ` +
+                `content: ${!emojiList.content ? 'none' : state.ownKind10030ContentUnreadable ? 'unreadable' : emojiList.content.includes('?iv=') ? 'nip04' : 'nip44'}`
+            );
+
+            if (refs.length) {
+                const refEvents = await state.pool.querySync(
+                    relays,
+                    {
+                        kinds: [CUSTOM_REACTION_SET_KIND],
+                        authors: [...new Set(refs.map((r) => r.pubkey))],
+                        '#d': [...new Set(refs.map((r) => r.d))],
+                        limit: Math.min(refs.length * 4, 100)
+                    },
+                    { maxWait: 9000, onauth: nostrAuthHandler }
+                );
+                for (const ref of refs) {
+                    const ev = (refEvents || [])
+                        .filter((e) => normalizePubkey(e.pubkey) === ref.pubkey && getTagValue(e.tags, 'd') === ref.d)
+                        .sort((a, b) => (b.created_at || 0) - (a.created_at || 0))[0];
+                    if (ev) mergeEmojiMeta(merged, parseCustomReactionSetMeta(ev));
+                }
+            }
+        }
+
+        merged.emojis = normalizeCustomEmojiLines(merged.emojis.join('\n'));
+        state.customReactionEmojiSet = merged.emojis;
+        state.customReactionEmojiUrlMap = merged.urlMap;
     } catch (e) {
         console.warn('Could not load custom reaction set from Nostr:', e);
         state.customReactionEmojiSet = [];
@@ -734,18 +939,48 @@ export async function saveOwnCustomReactionSetToNostr(list) {
         emojiTags.push(['emoji', shortcode, url]);
         publishedUrlMap[shortcode] = url;
     }
-    if (!emojiTags.length) {
+    if (emojis.length && !emojiTags.length) {
         throw new Error('No NIP-30 emoji tag entries available to publish.');
     }
+
+    // NIP-51 kind 10030: each entry goes back to the half it came from. New entries
+    // follow the list's existing style (private if the other client kept them private).
+    // 'a' set refs, other tags, and non-emoji private items are carried over verbatim.
+    const canEditPrivate = !state.ownKind10030ContentUnreadable;
+    const priorPrivateItems = state.ownKind10030PrivateItems || [];
+    const privateShortcodes = new Set(
+        priorPrivateItems.filter((t) => Array.isArray(t) && t[0] === 'emoji').map((t) => t[1])
+    );
+    const preferPrivate = canEditPrivate && privateShortcodes.size > 0;
+
+    const privateEmojiTags = [];
+    const publicEmojiTags = [];
+    for (const tag of emojiTags) {
+        if (canEditPrivate && (privateShortcodes.has(tag[1]) || preferPrivate)) {
+            privateEmojiTags.push(tag);
+        } else {
+            publicEmojiTags.push(tag);
+        }
+    }
+
+    const foreignTags = (state.ownKind10030Event?.tags || []).filter((t) => t[0] !== 'emoji');
+    let content = state.ownKind10030Event?.content || '';
+    let newPrivateItems = priorPrivateItems;
+    if (canEditPrivate) {
+        newPrivateItems = [
+            ...priorPrivateItems.filter((t) => !(Array.isArray(t) && t[0] === 'emoji')),
+            ...privateEmojiTags
+        ];
+        content = newPrivateItems.length
+            ? await window.nostr.nip44.encrypt(state.publicKey, JSON.stringify(newPrivateItems))
+            : '';
+    }
+
     const ev = {
-        kind: CUSTOM_REACTION_SET_KIND,
+        kind: USER_EMOJI_LIST_KIND,
         created_at: Math.floor(Date.now() / 1000),
-        tags: [
-            ['d', CUSTOM_REACTION_SET_D_TAG],
-            ['title', CUSTOM_REACTION_SET_D_TAG],
-            ...emojiTags
-        ],
-        content: ''
+        tags: [...foreignTags, ...publicEmojiTags],
+        content
     };
     const signed = await window.nostr.signEvent(ev);
     const targets = [...new Set([...(state.dmRelayUrls?.length ? state.dmRelayUrls : []), ...RELAY_URLS])];
@@ -754,6 +989,10 @@ export async function saveOwnCustomReactionSetToNostr(list) {
         return url;
     });
     await Promise.any(publishAttempts);
+    state.ownKind10030Event = signed;
+    if (canEditPrivate) {
+        state.ownKind10030PrivateItems = newPrivateItems;
+    }
     state.customReactionEmojiSet = emojis;
     state.customReactionEmojiUrlMap = publishedUrlMap;
 }

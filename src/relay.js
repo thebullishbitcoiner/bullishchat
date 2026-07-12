@@ -22,6 +22,10 @@ export async function fetchKind10050Relays(authorPubkey, options = {}) {
             { maxWait: options.maxWait ?? 9000, onauth: nostrAuthHandler }
         );
         const ev = (events || []).sort((a, b) => (b.created_at || 0) - (a.created_at || 0))[0];
+        if (normalizePubkey(authorPubkey) === state.publicKey) {
+            // Kept so a settings save can preserve any non-relay tags another client added.
+            state.ownKind10050Event = ev || null;
+        }
         if (!ev?.tags?.length) return [];
         return ev.tags.filter((t) => t[0] === 'relay' && typeof t[1] === 'string' && t[1].length > 0).map((t) => t[1]);
     } catch (e) {
@@ -85,6 +89,9 @@ export async function fetchKind10063Servers(authorPubkey) {
             { maxWait: 9000, onauth: nostrAuthHandler }
         );
         const ev = (events || []).sort((a, b) => (b.created_at || 0) - (a.created_at || 0))[0];
+        if (normalizePubkey(authorPubkey) === state.publicKey) {
+            state.ownKind10063Event = ev || null;
+        }
         if (!ev?.tags?.length) return [];
         return ev.tags.filter((t) => t[0] === 'server' && typeof t[1] === 'string' && t[1].length > 0).map((t) => t[1]);
     } catch (e) {

@@ -43,6 +43,7 @@ import {
     switchConversationTab
 } from './ui.js';
 import { initSettingsUi, loadOwnCustomReactionSetFromNostr } from './settings.js';
+import { loadMuteListFromNostr } from './mute.js';
 
 // Check if NIP-07 extension is available
 function hasNostrExtension() {
@@ -144,6 +145,11 @@ async function connectWithExtension() {
                 void idbPut('meta', { key: 'blossomServers', value: servers }).catch(() => {});
             }
         });
+
+        // Refresh the mute list from kind 10000 (may include mutes made on another device/client
+        // since our local IDB cache was written); re-render once resolved so any newly-muted
+        // conversation that slipped in from the DB cache is dropped from the list.
+        void loadMuteListFromNostr().then(() => updateConversationsList());
 
         setInboxLoading(true);
         await loadOwnCustomReactionSetFromNostr();

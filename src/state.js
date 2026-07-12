@@ -97,4 +97,23 @@ export const state = {
     activeChatRenderTimer: null,
     activeChatRenderPubkey: null,
     activeChatRenderNeedsHeader: false,
+    /** Pubkeys muted via the NIP-51 kind 10000 mute list — hidden from both conversation tabs. */
+    mutedPubkeys: new Set(),
+    /** Verbatim tags of our newest kind 10000 event (may hold plaintext p/word/t/e entries from other clients). */
+    muteListPublicTags: [],
+    /** Decrypted private items from the kind 10000 content (verbatim; non-p entries preserved on publish). */
+    muteListPrivateItems: [],
+    /** Original kind 10000 ciphertext — republished untouched if we couldn't decrypt it. */
+    muteListRawContent: '',
+    /** True when the kind 10000 content exists but could not be decrypted (blocks private-side edits). */
+    muteListContentUnreadable: false,
+    /** Newest own kind 10050/10063 events — saves merge non-relay/non-server tags back in. */
+    ownKind10050Event: null,
+    ownKind10063Event: null,
+    /** Newest own kind 10030 (user emoji list) — saves preserve its 'a' refs and content. */
+    ownKind10030Event: null,
+    /** Decrypted private items from the 10030 content (verbatim; non-emoji entries preserved on save). */
+    ownKind10030PrivateItems: [],
+    /** True when the 10030 content exists but could not be decrypted (blocks private-side edits). */
+    ownKind10030ContentUnreadable: false,
 };

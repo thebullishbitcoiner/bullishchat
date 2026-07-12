@@ -160,7 +160,69 @@ export function updateAvatarHost(host, pubkey) {
     avatar.textContent = avatarInitialFromLabel(getDisplayName(pubkey), pubkey);
 }
 
-export function createConversationItem(pubkey) {
+let activeConversationMenu = null;
+
+function closeConversationMenu() {
+    if (activeConversationMenu) {
+        activeConversationMenu.menu.remove();
+        document.removeEventListener('click', activeConversationMenu.onOutsideClick, true);
+        activeConversationMenu = null;
+    }
+}
+
+function openConversationMenu(item, pubkey, protocol) {
+    const alreadyOpenOnThisItem = activeConversationMenu?.item === item;
+    closeConversationMenu();
+    if (alreadyOpenOnThisItem) return;
+
+    const menu = document.createElement('div');
+    menu.className = 'conversation-item-menu';
+    menu.setAttribute('role', 'menu');
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.className = 'conversation-item-menu-item';
+    deleteBtn.setAttribute('role', 'menuitem');
+    deleteBtn.textContent = 'Delete conversation';
+    deleteBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        closeConversationMenu();
+        if (!confirm('Delete this conversation on this device? If they message you again, a new conversation will appear.')) {
+            return;
+        }
+        const { deleteConversationLocal } = await import('./messages.js');
+        await deleteConversationLocal(pubkey, protocol);
+    });
+
+    const muteBtn = document.createElement('button');
+    muteBtn.type = 'button';
+    muteBtn.className = 'conversation-item-menu-item conversation-item-menu-item--danger';
+    muteBtn.setAttribute('role', 'menuitem');
+    muteBtn.textContent = 'Mute user';
+    muteBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        closeConversationMenu();
+        if (!confirm('Mute this user? Their messages will stop appearing here (both tabs) until you unmute them in Settings.')) {
+            return;
+        }
+        const { muteConversation } = await import('./mute.js');
+        await muteConversation(pubkey);
+    });
+
+    menu.appendChild(deleteBtn);
+    menu.appendChild(muteBtn);
+    item.appendChild(menu);
+
+    const onOutsideClick = (e) => {
+        if (!menu.contains(e.target)) {
+            closeConversationMenu();
+        }
+    };
+    activeConversationMenu = { item, menu, onOutsideClick };
+    setTimeout(() => document.addEventListener('click', onOutsideClick, true), 0);
+}
+
+export function createConversationItem(pubkey, protocol = 'nip17') {
     const item = document.createElement('div');
     item.className = 'conversation-item';
     item.onclick = () => openChat(pubkey);
@@ -192,7 +254,75 @@ export function createConversationItem(pubkey) {
     content.appendChild(previewEl);
     main.appendChild(avatarHost);
     main.appendChild(content);
+
+    const menuBtn = document.createElement('button');
+    menuBtn.type = 'button';
+    menuBtn.className = 'conversation-item-menu-btn';
+    menuBtn.setAttribute('aria-label', 'Conversation options');
+    menuBtn.setAttribute('aria-haspopup', 'true');
+    menuBtn.textContent = '⋮';
+    menuBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openConversationMenu(item, pubkey, protocol);
+    });
+    main.appendChild(menuBtn);
+
     item.appendChild(main);
+
+    item.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        openConversationMenu(item, pubkey, protocol);
+    });
+
+    // Swipe-left (mobile) opens the same menu as right-click/⋮. Only claims the gesture
+    // once it's clearly more horizontal than vertical, so list scrolling still works.
+    let swipeStartX = null;
+    let swipeStartY = null;
+    let swipeActive = false;
+    let swipeTriggered = false;
+
+    item.addEventListener('touchstart', (e) => {
+        if (!isMobileLayout() || e.target.closest('.conversation-item-menu-btn')) {
+            swipeStartX = null;
+            return;
+        }
+        const t = e.touches[0];
+        swipeStartX = t.clientX;
+        swipeStartY = t.clientY;
+        swipeActive = false;
+        swipeTriggered = false;
+    }, { passive: true });
+
+    item.addEventListener('touchmove', (e) => {
+        if (swipeStartX === null) return;
+        const t = e.touches[0];
+        const dx = t.clientX - swipeStartX;
+        const dy = t.clientY - swipeStartY;
+        if (!swipeActive) {
+            if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+            if (Math.abs(dx) <= Math.abs(dy)) {
+                swipeStartX = null; // vertical scroll — let the browser handle it
+                return;
+            }
+            swipeActive = true;
+        }
+        e.preventDefault();
+        if (!swipeTriggered && dx < -60) {
+            swipeTriggered = true;
+            openConversationMenu(item, pubkey, protocol);
+        }
+    }, { passive: false });
+
+    const endSwipe = (e) => {
+        if (swipeTriggered) {
+            e.preventDefault();
+        }
+        swipeStartX = null;
+        swipeActive = false;
+        swipeTriggered = false;
+    };
+    item.addEventListener('touchend', endSwipe, { passive: false });
+    item.addEventListener('touchcancel', endSwipe, { passive: false });
 
     return { item, avatarHost, nameEl, dateEl, previewEl };
 }
@@ -218,7 +348,7 @@ export function updateConversationsList() {
         // Hide NIP-17 rows
         for (const [, row] of state.conversationItemEls.entries()) row.item.hidden = true;
 
-        const nip04Pubkeys = Object.keys(state.nip04Conversations).sort(
+        const nip04Pubkeys = Object.keys(state.nip04Conversations).filter((pk) => !state.mutedPubkeys.has(pk)).sort(
             (a, b) => lastConversationSortTime(state.nip04Conversations[b]) - lastConversationSortTime(state.nip04Conversations[a])
         );
         const seenNip04 = new Set();
@@ -229,7 +359,7 @@ export function updateConversationsList() {
 
             let row = state.nip04ConversationItemEls.get(pubkey);
             if (!row) {
-                row = createConversationItem(pubkey);
+                row = createConversationItem(pubkey, 'nip04');
                 row.item.onclick = () => openNip04Chat(pubkey);
                 state.nip04ConversationItemEls.set(pubkey, row);
             }
@@ -254,7 +384,7 @@ export function updateConversationsList() {
     // Hide NIP-04 rows
     for (const [, row] of state.nip04ConversationItemEls.entries()) row.item.hidden = true;
 
-    const orderedPubkeys = Object.keys(state.conversations).sort(
+    const orderedPubkeys = Object.keys(state.conversations).filter((pk) => !state.mutedPubkeys.has(pk)).sort(
         (a, b) => lastConversationSortTime(state.conversations[b]) - lastConversationSortTime(state.conversations[a])
     );
     const seen = new Set();
@@ -1023,7 +1153,7 @@ export function toggleFabMenu() {
 
 export function isOverlayOpen() {
     const modal = document.getElementById('newChatModal');
-    const settings = document.getElementById('settingsModal');
+    const settings = document.getElementById('settingsPage');
     const lightbox = document.getElementById('imageLightbox');
     return Boolean((modal && !modal.hidden) || (settings && !settings.hidden) || (lightbox && !lightbox.hidden));
 }
@@ -1403,11 +1533,11 @@ export function initNewChatUi() {
             e.preventDefault();
             return;
         }
-        const settingsEl = document.getElementById('settingsModal');
+        const settingsEl = document.getElementById('settingsPage');
         if (settingsEl && !settingsEl.hidden) {
-            // import lazily to avoid circular
-            import('./settings.js').then(({ closeSettingsModal }) => {
-                closeSettingsModal();
+            // import lazily to avoid circular; Esc backs out one level (section → menu → closed)
+            import('./settings.js').then(({ settingsPageBack }) => {
+                settingsPageBack();
             });
             e.preventDefault();
             return;

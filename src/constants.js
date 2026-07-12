@@ -9,7 +9,8 @@ export const DEFAULT_QUICK_REACTIONS = ['🤙', '💜', '👍', '😂', '🚀'];
 export const DEFAULT_EXTRA_REACTIONS = ['🔥', '👏', '🙏', '🎉', '👀', '💯', '🤯', '🥲', '😎', '🤔'];
 
 export const CUSTOM_REACTION_SET_KIND = 30030;
-export const CUSTOM_REACTION_SET_D_TAG = 'bullishchat-reaction-set';
+/** NIP-51 user emoji list: direct emoji tags + 'a' refs to kind 30030 sets. Canonical home for the user's picks. */
+export const USER_EMOJI_LIST_KIND = 10030;
 /** NIP-30 does not define a max; this caps kind 30030 size for UI and relay friendliness. */
 export const MAX_CUSTOM_REACTION_EMOJIS = 256;
 
@@ -56,6 +57,8 @@ export const NIP04_HISTORY_LOOKBACK_SECS = 180 * 24 * 60 * 60;
 /** NIP-59 backdating means we need at least a 2-day overlap on startup to avoid missing
  *  messages whose created_at was randomised below the stored cursor. */
 export const STARTUP_HISTORY_OVERLAP_SECS = 2 * 24 * 60 * 60;
+
+export const MUTE_LIST_KIND = 10000;
 
 export const DEFAULT_BLOSSOM_SERVERS = [
     'https://blossom.band',
