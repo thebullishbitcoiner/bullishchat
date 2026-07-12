@@ -56,7 +56,7 @@ export function renderSettingsRelayList() {
         row.className = 'settings-relay-item';
         const text = document.createElement('div');
         text.className = 'settings-relay-url';
-        text.textContent = relay;
+        text.textContent = relay.replace(/\/$/, '');
         text.title = relay;
         const rm = document.createElement('button');
         rm.type = 'button';

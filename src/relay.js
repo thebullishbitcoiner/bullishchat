@@ -1,5 +1,5 @@
 import { state } from './state.js';
-import { RELAY_URLS, DISCOVERY_RELAYS, normalizePubkey } from './constants.js';
+import { RELAY_URLS, normalizePubkey } from './constants.js';
 import { idbPut } from './db.js';
 
 export async function nostrAuthHandler(authEventTemplate) {
@@ -39,7 +39,7 @@ export async function fetchNip65InboxRelays(authorPubkey, queryRelays) {
     try {
         const relays = queryRelays?.length
             ? [...new Set(queryRelays)]
-            : [...new Set([...(state.dmRelayUrls?.length ? state.dmRelayUrls : []), ...RELAY_URLS, ...DISCOVERY_RELAYS])];
+            : [...new Set([...(state.dmRelayUrls?.length ? state.dmRelayUrls : []), ...RELAY_URLS])];
         const events = await state.pool.querySync(
             relays,
             { kinds: [10002], authors: [authorPubkey], limit: 3 },
@@ -58,27 +58,17 @@ export async function fetchNip65InboxRelays(authorPubkey, queryRelays) {
 }
 
 /**
- * Resolve inbox relays for a pubkey with a three-tier fallback chain used by all
- * major NIP-17 clients (Amethyst, Coracle, 0xchat):
+ * Resolve inbox relays for a pubkey with a two-tier fallback chain:
  *   1. kind 10050 on current relay set
- *   2. kind 10050 on relay-list indexers (purplepag.es)
- *   3. kind 10002 NIP-65 inbox relays as last resort
+ *   2. kind 10002 NIP-65 inbox relays as last resort
  */
 export async function resolveInboxRelays(authorPubkey) {
     // 1. Try kind 10050 on current relay set
     let relays = await fetchKind10050Relays(authorPubkey);
     if (relays.length) return relays;
 
-    // 2. Try kind 10050 on relay-list indexers
-    const discoverySet = [...new Set([...DISCOVERY_RELAYS, ...RELAY_URLS])];
-    relays = await fetchKind10050Relays(authorPubkey, { relays: discoverySet, maxWait: 8000 });
-    if (relays.length) {
-        console.info(`resolveInboxRelays: found kind 10050 via discovery relays for ${authorPubkey.slice(0, 8)}`);
-        return relays;
-    }
-
-    // 3. Fall back to NIP-65 (kind 10002) inbox relays
-    relays = await fetchNip65InboxRelays(authorPubkey, discoverySet);
+    // 2. Fall back to NIP-65 (kind 10002) inbox relays
+    relays = await fetchNip65InboxRelays(authorPubkey);
     if (relays.length) {
         console.info(`resolveInboxRelays: using NIP-65 inbox relays as fallback for ${authorPubkey.slice(0, 8)}`);
     }

@@ -108,26 +108,9 @@ async function connectWithExtension() {
         // and re-sends active subscriptions, covering desktop WiFi drops without manual catchup.
         state.pool = new SimplePool({ enableReconnect: true });
 
-        // Bootstrap against defaults + relay-list indexers to discover our kind 10050.
+        // Connect the default relay set only — kind 10050/NIP-65 inbox relay discovery is
+        // slow (multi-relay EOSE waits) and runs in the background so it doesn't block login.
         const bootstrapResults = await connectRelaySet(RELAY_URLS);
-
-        // Full three-tier resolution: kind 10050 on current set → discovery relays → NIP-65 fallback.
-        let ownInboxRelays = await resolveInboxRelays(state.publicKey);
-        if (!ownInboxRelays.length) {
-            console.warn('Inbox relays not found via kind 10050 or NIP-65 — using default relays. ' +
-                'Go to Settings → DM Relays to configure your inbox relays.');
-        }
-
-        state.dmRelayUrls = ownInboxRelays.length ? [...new Set(ownInboxRelays)] : [...RELAY_URLS];
-        // Persist so the next session can bootstrap kind 10050 discovery from the user's own relay.
-        void idbPut('meta', { key: 'dmRelayUrls', value: state.dmRelayUrls }).catch(() => {});
-        const additionalRelayUrls = state.dmRelayUrls.filter((url) => !RELAY_URLS.includes(url));
-        const additionalResults = additionalRelayUrls.length ? await connectRelaySet(additionalRelayUrls) : [];
-        const relayResults = [...bootstrapResults, ...additionalResults];
-        const relayStatusByUrl = new Map(relayResults.map((r) => [r.url, r]));
-        const inboxRelayStatuses = ownInboxRelays.length
-            ? state.dmRelayUrls.map((url) => relayStatusByUrl.get(url) || { url, success: false })
-            : [];
 
         document.getElementById('connectionSetup').style.display = 'none';
         document.getElementById('convTabs')?.removeAttribute('hidden');
@@ -143,10 +126,12 @@ async function connectWithExtension() {
         const chatAreaEl = document.getElementById('chatArea');
         if (chatAreaEl) chatAreaEl.removeAttribute('hidden');
 
-        updateRelayStatusCard(bootstrapResults, inboxRelayStatuses);
+        updateRelayStatusCard(bootstrapResults, []);
 
         // Load persisted state from IndexedDB before showing conversations — instant display
-        // for returning users without waiting for relay queries to complete.
+        // for returning users without waiting for relay queries to complete. This also restores
+        // dmRelayUrls discovered in a prior session, so subscriptions below can already target
+        // the user's real inbox relay instead of only the app defaults.
         await loadStateFromDB(state.publicKey);
         await loadNip04StateFromDB(state.publicKey);
         updateConversationsList();
@@ -176,6 +161,11 @@ async function connectWithExtension() {
         });
         void loadHistoricalNip04Messages();
 
+        // Resolve authoritative inbox relays (kind 10050, falling back to NIP-65) in the
+        // background. If discovery finds a relay set we weren't already using, connect to
+        // it and restart the live subscriptions so messages there aren't missed.
+        void refreshInboxRelaysInBackground(bootstrapResults);
+
     } catch (error) {
         setInboxLoading(false);
         if (loginBtn) {
@@ -184,6 +174,65 @@ async function connectWithExtension() {
         }
         alert('Connection failed: ' + error.message);
         console.error(error);
+    }
+}
+
+/**
+ * Runs after login without blocking the UI. Resolves the user's real inbox relays
+ * (kind 10050, falling back to NIP-65) and, if that differs from what we're already
+ * using (defaults or a prior-session cache), connects to it and restarts the live
+ * subscriptions so new messages on that relay aren't missed for up to a full
+ * incremental-sync interval.
+ */
+async function refreshInboxRelaysInBackground(bootstrapResults) {
+    try {
+        const discovered = await resolveInboxRelays(state.publicKey);
+        if (!discovered.length) {
+            console.warn('Inbox relays not found via kind 10050 or NIP-65 — using default relays. ' +
+                'Go to Settings → DM Relays to configure your inbox relays.');
+            return;
+        }
+
+        const newSet = [...new Set(discovered)];
+        // Subscriptions were opened against state.dmRelayUrls as it stood at login (defaults,
+        // or a prior-session cache) — only restart them if discovery actually changed that set.
+        const subscriptionRelaysChanged = newSet.length !== state.dmRelayUrls.length ||
+            !newSet.every((url) => state.dmRelayUrls.includes(url));
+
+        state.dmRelayUrls = newSet;
+        // Persist so the next session can skip straight to the user's own relay.
+        void idbPut('meta', { key: 'dmRelayUrls', value: state.dmRelayUrls }).catch(() => {});
+
+        const additionalRelayUrls = newSet.filter((url) => !RELAY_URLS.includes(url));
+        const additionalResults = additionalRelayUrls.length ? await connectRelaySet(additionalRelayUrls) : [];
+        // Always refresh the card so the "Inbox relays" section reflects the resolved set,
+        // even when it matches what we already had (e.g. a returning user's cached relays).
+        const relayStatusByUrl = new Map([...bootstrapResults, ...additionalResults].map((r) => [r.url, r]));
+        const inboxRelayStatuses = newSet.map((url) => relayStatusByUrl.get(url) || { url, success: false });
+        updateRelayStatusCard(bootstrapResults, inboxRelayStatuses);
+
+        if (!subscriptionRelaysChanged) return;
+
+        if (state.messageSubscription) {
+            try {
+                state.messageSubscription.close();
+            } catch (e) {
+                console.warn('Closing message subscription for inbox relay refresh:', e);
+            }
+        }
+        if (state.kind4Subscription) {
+            for (const sub of state.kind4Subscription) {
+                try {
+                    sub.close();
+                } catch (e) {
+                    console.warn('Closing NIP-04 subscription for inbox relay refresh:', e);
+                }
+            }
+        }
+        subscribeToMessages();
+        subscribeToNip04Messages();
+    } catch (e) {
+        console.warn('Background inbox relay resolution failed:', e);
     }
 }
 

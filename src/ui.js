@@ -1442,7 +1442,7 @@ export function updateRelayStatusCard(defaultResults, inboxResults = []) {
         for (const { url, success } of results) {
             const row = document.createElement('div');
             row.className = `right-panel-relay${success ? '' : ' right-panel-relay--error'}`;
-            row.textContent = url.replace(/^wss?:\/\//, '');
+            row.textContent = url.replace(/^wss?:\/\//, '').replace(/\/$/, '');
             card.appendChild(row);
         }
     };
@@ -1500,7 +1500,7 @@ export async function updateRightPanel(pubkey) {
     for (const url of relays) {
         const row = document.createElement('div');
         row.className = 'right-panel-relay';
-        row.textContent = url.replace(/^wss?:\/\//, '');
+        row.textContent = url.replace(/^wss?:\/\//, '').replace(/\/$/, '');
         card.appendChild(row);
     }
 }

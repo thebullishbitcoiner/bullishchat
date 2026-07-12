@@ -725,11 +725,10 @@ export function getConversationFingerprint(pubkey) {
 }
 
 export async function publishRumorAsGiftWrap(rumor, peerPubkey) {
-    // Three-tier resolution matching Amethyst / 0xchat / Coracle:
+    // Two-tier resolution:
     //   1. kind 10050 on current relay set
-    //   2. kind 10050 on relay-list indexers (purplepag.es)
-    //   3. NIP-65 kind 10002 inbox relays as last resort
-    //   4. Default relay set — contact hasn't published inbox preferences; best-effort delivery
+    //   2. NIP-65 kind 10002 inbox relays as last resort
+    //   3. Default relay set — contact hasn't published inbox preferences; best-effort delivery
     let recipientInboxRelays = await resolveInboxRelays(peerPubkey);
     if (!recipientInboxRelays.length) {
         console.warn(`No inbox relays found for ${peerPubkey.slice(0, 8)} — publishing to default relays as best-effort delivery`);

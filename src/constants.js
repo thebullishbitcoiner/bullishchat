@@ -1,13 +1,9 @@
 // Relay URLs to connect to
 export const RELAY_URLS = [
     'wss://relay.0xchat.com',
-    'wss://relay.damus.io',
     'wss://relay.primal.net',
     'wss://nos.lol'
 ];
-
-/** Relay-list indexers used for NIP-17/NIP-65 discovery when kind 10050 is not on default relays. */
-export const DISCOVERY_RELAYS = ['wss://purplepag.es'];
 
 export const DEFAULT_QUICK_REACTIONS = ['🤙', '💜', '👍', '😂', '🚀'];
 export const DEFAULT_EXTRA_REACTIONS = ['🔥', '👏', '🙏', '🎉', '👀', '💯', '🤯', '🥲', '😎', '🤔'];
