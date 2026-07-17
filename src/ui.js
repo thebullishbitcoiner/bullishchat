@@ -331,6 +331,11 @@ export function switchConversationTab(tab) {
 
 export function updateConversationsList() {
     const list = document.getElementById('conversationsList');
+    // Switching tabs hides the other tab's rows as a side effect below, independent of whether the
+    // underlying conversation data changed — so the fingerprint short-circuit must not apply on the
+    // render right after a tab switch, or the rows it just hid may never get shown again.
+    const tabChanged = state.activeConversationTab !== state.lastRenderedConversationsTab;
+    state.lastRenderedConversationsTab = state.activeConversationTab;
 
     if (state.activeConversationTab === 'nip04') {
         // Hide NIP-17 rows
@@ -347,7 +352,7 @@ export function updateConversationsList() {
             const isUnread = state.unreadNip04.has(pk);
             return [pk, getDisplayName(pk), formatConversationPreview(lastMsg), lastMsg?.timestamp || 0, isActive ? 1 : 0, isUnread ? 1 : 0].join(':');
         }).join('|');
-        if (nip04Fingerprint === state.nip04ConversationsListFingerprint) {
+        if (!tabChanged && nip04Fingerprint === state.nip04ConversationsListFingerprint) {
             return;
         }
         state.nip04ConversationsListFingerprint = nip04Fingerprint;
@@ -396,7 +401,7 @@ export function updateConversationsList() {
         const isUnread = state.unreadNip17.has(pk);
         return [pk, getDisplayName(pk), formatConversationPreview(lastMsg), lastMsg?.timestamp || 0, isActive ? 1 : 0, isUnread ? 1 : 0].join(':');
     }).join('|');
-    if (fingerprint === state.conversationsListFingerprint) {
+    if (!tabChanged && fingerprint === state.conversationsListFingerprint) {
         return;
     }
     state.conversationsListFingerprint = fingerprint;

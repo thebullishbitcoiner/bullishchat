@@ -18,6 +18,9 @@ export const state = {
     /** Skip re-touching conversation-list DOM when a poll finds nothing actually changed. */
     conversationsListFingerprint: '',
     nip04ConversationsListFingerprint: '',
+    /** Which tab ('nip04' or not) the conversation list was last actually rendered for — lets a
+     *  tab switch force a real render even when the fingerprint is unchanged. */
+    lastRenderedConversationsTab: null,
     /** Skip rebuilding the open message thread (and closing any open reaction picker) when a poll
      *  re-renders the active chat but nothing in it actually changed. */
     displayedMessagesFingerprint: '',
