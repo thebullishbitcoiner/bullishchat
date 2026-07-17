@@ -824,6 +824,9 @@ body.is-authenticated .conversations-list {
     flex-direction: column;
     gap: 8px;
     min-height: 0;
+    /* Desktop classic scrollbars (~15-17px, reserved space) sit inside this padding on the
+       right; mobile uses overlay scrollbars that reserve none. Extra right padding on desktop
+       gives the -20px .message-actions offset room to clear the bubble AND the scrollbar. */
 }
 
 .message {
@@ -1130,16 +1133,27 @@ body.is-authenticated .conversations-list {
     margin-top: 4px;
 }
 
+#messagePopoverLayer {
+    position: fixed;
+    inset: 0;
+    z-index: 500;
+    pointer-events: none;
+}
+
+#messagePopoverLayer > * {
+    pointer-events: auto;
+}
+
 .message-actions {
     position: absolute;
     top: 3px;
-    right: -21px;
+    right: -20px;
     z-index: 2;
 }
 
 .message.received .message-actions {
     right: auto;
-    left: -21px;
+    left: -20px;
 }
 
 .message-react-btn {
@@ -1165,20 +1179,12 @@ body.is-authenticated .conversations-list {
     outline: none;
 }
 
-.message-reaction-picker {
-    position: absolute;
-    top: calc(100% + 6px);
-    bottom: auto;
-    right: 0;
-    left: auto;
+.message-menu {
+    position: fixed;
     z-index: 30;
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 6px;
-    padding: 6px 8px;
-    max-width: min(calc(100vw - 32px), 280px);
-    border-radius: 999px;
+    min-width: 140px;
+    padding: 4px;
+    border-radius: 10px;
     background: rgba(14, 14, 14, 0.96);
     border: 1px solid rgba(255, 255, 255, 0.16);
     box-shadow: 0 8px 22px rgba(0, 0, 0, 0.5);
@@ -1186,75 +1192,38 @@ body.is-authenticated .conversations-list {
     -webkit-backdrop-filter: blur(8px) saturate(120%);
 }
 
-.message-reaction-picker[hidden] {
+.message-menu[hidden] {
     display: none !important;
 }
 
-.message-reaction-picker[data-expanded='true'] {
-    border-radius: 14px;
-    width: 186px;
-    max-width: 186px;
-}
-
-.message.received .message-reaction-picker {
-    right: auto;
-    left: 0;
-}
-
-.message-reaction-picker-quick {
-    display: flex;
-    flex-direction: row;
-    flex-wrap: nowrap;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 6px;
-}
-
-.message.received .message-reaction-picker-quick {
-    justify-content: flex-start;
-}
-
-.message-reaction-option {
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
-    border: none;
-    background: rgba(255, 255, 255, 0.06);
-    color: inherit;
-    font-size: 16px;
-    line-height: 1;
-    cursor: pointer;
-    padding: 0;
-}
-
-.message-reaction-custom-emoji {
-    width: 20px;
-    height: 20px;
-    object-fit: contain;
-    pointer-events: none;
-}
-
-.message-reaction-option:hover {
-    background: rgba(255, 255, 255, 0.14);
-}
-
-.message-reaction-option--more {
-    font-size: 18px;
-    font-weight: 700;
-}
-
-.message-reaction-expanded {
+.message-menu-item {
+    display: block;
     width: 100%;
-    display: grid;
-    grid-template-columns: repeat(5, 28px);
-    justify-content: center;
-    justify-items: center;
-    align-content: start;
-    gap: 6px;
-    padding-top: 4px;
+    padding: 8px 12px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 13px;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
 }
 
-.message-reaction-expanded[hidden] {
+.message-menu-item:hover,
+.message-menu-item:focus-visible {
+    background: rgba(255, 255, 255, 0.1);
+    outline: none;
+}
+
+.message-reaction-picker {
+    /* Bare host for the real emoji-mart picker element, which supplies its own panel chrome
+       (background, border, shadow) — this wrapper only exists for fixed positioning. */
+    position: fixed;
+    z-index: 30;
+}
+
+.message-reaction-picker[hidden] {
     display: none !important;
 }
 
@@ -1818,6 +1787,50 @@ body.is-authenticated .sidebar-fab:not([hidden]) {
 .modal-close:focus-visible {
     color: var(--text-primary);
     outline: none;
+}
+
+.modal-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.modal-copy-btn {
+    width: 34px;
+    height: 34px;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.modal-copy-btn:hover,
+.modal-copy-btn:focus-visible {
+    color: var(--text-primary);
+    outline: none;
+}
+
+.modal--view-json {
+    max-width: 560px;
+}
+
+.view-json-body {
+    margin: 0;
+    padding: 16px 18px;
+    overflow: auto;
+    flex: 1;
+    min-height: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.6;
+    color: #cbc4b7;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 .modal-label {
@@ -2652,6 +2665,12 @@ body.is-authenticated .sidebar-fab:not([hidden]) {
 
 @keyframes spin {
     to { transform: rotate(360deg); }
+}
+
+@media (min-width: 769px) {
+    .messages-container {
+        padding-right: 40px;
+    }
 }
 
 /* Mobile: full-width list OR full-width chat; back returns to list */

@@ -563,9 +563,7 @@ export async function handleGiftWrappedMessage(giftWrap, options = {}) {
                     if (state.currentChat === conversationPubkey) {
                         queueActiveChatRender(conversationPubkey);
                     }
-                    // Lazy import to avoid circular dependency
-                    const { updateConversationsList } = await import('./ui.js');
-                    updateConversationsList();
+                    queueConversationsListUpdate();
                 }
                 return;
             }
@@ -589,7 +587,9 @@ export async function handleGiftWrappedMessage(giftWrap, options = {}) {
                     fileMeta,
                     timestamp: rumor.created_at,
                     from: authorPubkey,
-                    actualTimestamp: giftWrap.created_at
+                    actualTimestamp: giftWrap.created_at,
+                    pubkey: rumor.pubkey,
+                    tags: rumor.tags
                 };
             } else {
                 newMsg = {
@@ -598,7 +598,9 @@ export async function handleGiftWrappedMessage(giftWrap, options = {}) {
                     content: rumor.content,
                     timestamp: rumor.created_at,
                     from: authorPubkey,
-                    actualTimestamp: giftWrap.created_at
+                    actualTimestamp: giftWrap.created_at,
+                    pubkey: rumor.pubkey,
+                    tags: rumor.tags
                 };
             }
             state.conversations[conversationPubkey].push(newMsg);
@@ -613,8 +615,7 @@ export async function handleGiftWrappedMessage(giftWrap, options = {}) {
             }
 
             if (!options.suppressUi) {
-                const { updateConversationsList } = await import('./ui.js');
-                updateConversationsList();
+                queueConversationsListUpdate();
                 if (state.currentChat === conversationPubkey) {
                     queueActiveChatRender(conversationPubkey, { header: true });
                 }
@@ -931,7 +932,9 @@ export async function sendMessage() {
             kind: 14,
             content: content,
             timestamp: now,
-            from: state.publicKey
+            from: state.publicKey,
+            pubkey: rumor.pubkey,
+            tags: rumor.tags
         });
 
         const { displayMessages, updateConversationsList } = await import('./ui.js');
@@ -1025,6 +1028,9 @@ export async function handleKind4Event(event) {
         content,
         timestamp: event.created_at,
         from: event.pubkey,
+        pubkey: event.pubkey,
+        tags: event.tags,
+        sig: event.sig,
     };
 
     if (!state.nip04Conversations[peerPubkey]) state.nip04Conversations[peerPubkey] = [];
@@ -1069,7 +1075,16 @@ export async function sendNip04Message(peerPubkey, text) {
         const signed = await window.nostr.signEvent(unsigned);
         state.pool.publish(RELAY_URLS, signed);
 
-        const localMsg = { id: signed.id, kind: 4, content: text, timestamp: now, from: state.publicKey };
+        const localMsg = {
+            id: signed.id,
+            kind: 4,
+            content: text,
+            timestamp: now,
+            from: state.publicKey,
+            pubkey: signed.pubkey,
+            tags: signed.tags,
+            sig: signed.sig
+        };
         if (!state.nip04Conversations[peerPubkey]) state.nip04Conversations[peerPubkey] = [];
         state.nip04Conversations[peerPubkey].push(localMsg);
         state.seenKind4EventIds.add(signed.id);

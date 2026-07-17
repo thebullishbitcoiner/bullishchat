@@ -15,6 +15,12 @@ export const state = {
     brokenAvatarUrls: new Set(),
     /** Keep stable DOM rows for conversation list to avoid avatar remount flicker. */
     conversationItemEls: new Map(),
+    /** Skip re-touching conversation-list DOM when a poll finds nothing actually changed. */
+    conversationsListFingerprint: '',
+    nip04ConversationsListFingerprint: '',
+    /** Skip rebuilding the open message thread (and closing any open reaction picker) when a poll
+     *  re-renders the active chat but nothing in it actually changed. */
+    displayedMessagesFingerprint: '',
     /** De-dupe rumors that can arrive via sender/receiver copies across relays. */
     seenRumorIds: new Set(),
     /** Reactions that arrive before their target message. */

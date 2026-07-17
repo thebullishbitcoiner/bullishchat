@@ -3,8 +3,6 @@ import * as nip19 from 'nostr-tools/nip19';
 import { state } from './state.js';
 import {
     normalizePubkey,
-    DEFAULT_QUICK_REACTIONS,
-    DEFAULT_EXTRA_REACTIONS,
     MAX_CUSTOM_REACTION_EMOJIS,
     NOSTR_ARCHIVES_SEARCH_SUGGEST_URL
 } from './constants.js';
@@ -37,16 +35,6 @@ export function splitGraphemes(str) {
         return [...seg.segment(str)].map((s) => s.segment);
     }
     return Array.from(str);
-}
-
-export function getReactionSet() {
-    const list = state.customReactionEmojiSet.length
-        ? state.customReactionEmojiSet
-        : [...DEFAULT_QUICK_REACTIONS, ...DEFAULT_EXTRA_REACTIONS];
-    return {
-        quick: list.slice(0, 5),
-        extra: list.slice(5)
-    };
 }
 
 export function emojiShortcodeFromToken(token) {
@@ -351,6 +339,19 @@ export function updateConversationsList() {
         const nip04Pubkeys = Object.keys(state.nip04Conversations).filter((pk) => !state.mutedPubkeys.has(pk)).sort(
             (a, b) => lastConversationSortTime(state.nip04Conversations[b]) - lastConversationSortTime(state.nip04Conversations[a])
         );
+
+        const nip04Fingerprint = nip04Pubkeys.map((pk) => {
+            const conv = state.nip04Conversations[pk];
+            const lastMsg = conv.length > 0 ? conv[conv.length - 1] : null;
+            const isActive = state.currentChat === pk && state.currentChatProtocol === 'nip04';
+            const isUnread = state.unreadNip04.has(pk);
+            return [pk, getDisplayName(pk), formatConversationPreview(lastMsg), lastMsg?.timestamp || 0, isActive ? 1 : 0, isUnread ? 1 : 0].join(':');
+        }).join('|');
+        if (nip04Fingerprint === state.nip04ConversationsListFingerprint) {
+            return;
+        }
+        state.nip04ConversationsListFingerprint = nip04Fingerprint;
+
         const seenNip04 = new Set();
         for (const pubkey of nip04Pubkeys) {
             seenNip04.add(pubkey);
@@ -387,6 +388,19 @@ export function updateConversationsList() {
     const orderedPubkeys = Object.keys(state.conversations).filter((pk) => !state.mutedPubkeys.has(pk)).sort(
         (a, b) => lastConversationSortTime(state.conversations[b]) - lastConversationSortTime(state.conversations[a])
     );
+
+    const fingerprint = orderedPubkeys.map((pk) => {
+        const conv = state.conversations[pk];
+        const lastMsg = conv.length > 0 ? conv[conv.length - 1] : null;
+        const isActive = state.currentChat === pk && state.currentChatProtocol !== 'nip04';
+        const isUnread = state.unreadNip17.has(pk);
+        return [pk, getDisplayName(pk), formatConversationPreview(lastMsg), lastMsg?.timestamp || 0, isActive ? 1 : 0, isUnread ? 1 : 0].join(':');
+    }).join('|');
+    if (fingerprint === state.conversationsListFingerprint) {
+        return;
+    }
+    state.conversationsListFingerprint = fingerprint;
+
     const seen = new Set();
     for (const pubkey of orderedPubkeys) {
         seen.add(pubkey);
@@ -571,37 +585,215 @@ export function formatConversationDate(timestamp) {
     }
 }
 
-function createReactionOptionButton(emoji, picker, msg, onBeforeSend) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'message-reaction-option';
-    const shortcode = emojiShortcodeFromToken(emoji);
-    const url = shortcode ? state.customReactionEmojiUrlMap[shortcode] : '';
-    if (url) {
-        const img = document.createElement('img');
-        img.src = url;
-        img.alt = emoji;
-        img.className = 'message-reaction-custom-emoji';
-        img.referrerPolicy = 'no-referrer';
-        img.loading = 'lazy';
-        b.appendChild(img);
-        b.title = emoji;
-    } else {
-        b.textContent = emoji;
+/** Positions a fixed-position popover (message menu / reaction picker) from an anchor button's
+ *  real screen coordinates, in #messagePopoverLayer — independent of any ancestor's width/overflow
+ *  clipping, which is what made the old CSS-only (absolute, anchored-to-bubble) positioning break
+ *  whenever the sidebar/right-panel left the chat column narrower than expected. */
+function positionPopoverNearButton(el, anchorBtn, alignRight) {
+    const margin = 6;
+    const viewportMargin = 8;
+    const btnRect = anchorBtn.getBoundingClientRect();
+    const elRect = el.getBoundingClientRect();
+
+    let left = alignRight ? btnRect.right - elRect.width : btnRect.left;
+    let top = btnRect.bottom + margin;
+
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+
+    if (top + elRect.height > vh - viewportMargin) {
+        top = btnRect.top - margin - elRect.height;
     }
-    b.addEventListener('click', (e) => {
-        e.stopPropagation();
-        picker.hidden = true;
-        if (typeof onBeforeSend === 'function') onBeforeSend();
-        void sendReactionToMessage(msg, emoji);
+    if (top < viewportMargin) {
+        top = viewportMargin;
+    }
+    if (left + elRect.width > vw - viewportMargin) {
+        left = vw - viewportMargin - elRect.width;
+    }
+    if (left < viewportMargin) {
+        left = viewportMargin;
+    }
+
+    el.style.top = `${top}px`;
+    el.style.left = `${left}px`;
+}
+
+let sharedReactionPickerPromise = null;
+
+/** Lazily builds a single emoji-mart picker instance shared by every message row, instead of one
+ *  per message. Building one per message left a window (dynamic-import fetch + first paint) during
+ *  which an unrelated incoming message could trigger displayMessages() to wipe the popover layer,
+ *  destroying the picker mid-construction — a persistent shared instance is never torn down by a
+ *  conversation re-render, so that race can't happen. It gets retargeted (which message it reacts
+ *  to) and repositioned (which button it's anchored to) on every open instead of rebuilt. */
+function getSharedReactionPicker() {
+    if (sharedReactionPickerPromise) return sharedReactionPickerPromise;
+
+    sharedReactionPickerPromise = (async () => {
+        const [{ Picker }, { default: emojiMartData }] = await Promise.all([
+            import('emoji-mart'),
+            import('@emoji-mart/data')
+        ]);
+
+        const customTokens = (state.customReactionEmojiSet || []).filter((token) => {
+            const shortcode = emojiShortcodeFromToken(token);
+            return shortcode && state.customReactionEmojiUrlMap[shortcode];
+        });
+        const custom = customTokens.length
+            ? [{
+                id: 'custom',
+                name: 'Custom',
+                emojis: customTokens.map((token) => {
+                    const shortcode = emojiShortcodeFromToken(token);
+                    return {
+                        id: shortcode,
+                        name: shortcode,
+                        keywords: [shortcode],
+                        skins: [{ src: state.customReactionEmojiUrlMap[shortcode] }]
+                    };
+                })
+            }]
+            : [];
+
+        let currentMsg = null;
+        let currentOnPick = null;
+
+        const root = document.createElement('div');
+        root.className = 'message-reaction-picker';
+        root.hidden = true;
+
+        const picker = new Picker({
+            data: emojiMartData,
+            custom,
+            theme: 'dark',
+            previewPosition: 'none',
+            skinTonePosition: 'search',
+            onEmojiSelect: (emoji) => {
+                if (!currentMsg) return;
+                const token = emoji.native || `:${emoji.id}:`;
+                void sendReactionToMessage(currentMsg, token);
+                if (typeof currentOnPick === 'function') currentOnPick();
+            }
+        });
+        root.appendChild(picker);
+        document.getElementById('messagePopoverLayer')?.appendChild(root);
+
+        return {
+            root,
+            setTarget(msg, onPick) {
+                currentMsg = msg;
+                currentOnPick = onPick;
+            }
+        };
+    })();
+
+    return sharedReactionPickerPromise;
+}
+
+function hideSharedReactionPicker() {
+    if (!sharedReactionPickerPromise) return;
+    sharedReactionPickerPromise.then((shared) => {
+        shared.root.hidden = true;
     });
-    return b;
+}
+
+function waitForNonZeroSize(el, framesLeft = 30) {
+    return new Promise((resolve) => {
+        const check = () => {
+            const rect = el.getBoundingClientRect();
+            if ((rect.width > 10 && rect.height > 10) || framesLeft <= 0) {
+                resolve();
+                return;
+            }
+            framesLeft -= 1;
+            requestAnimationFrame(check);
+        };
+        check();
+    });
+}
+
+/** ⋮ menu — message-level actions (View JSON, more later). Shared by nip17 and nip04 rendering. */
+function buildMessageMenu(msg, options = {}) {
+    const actionsEl = document.createElement('div');
+    actionsEl.className = 'message-actions';
+
+    const menuBtn = document.createElement('button');
+    menuBtn.type = 'button';
+    menuBtn.className = 'message-react-btn';
+    menuBtn.setAttribute('aria-label', 'Message options');
+    menuBtn.textContent = '⋮';
+
+    const menu = document.createElement('div');
+    menu.className = 'message-menu';
+    menu.hidden = true;
+
+    const copyTextBtn = document.createElement('button');
+    copyTextBtn.type = 'button';
+    copyTextBtn.className = 'message-menu-item';
+    copyTextBtn.textContent = 'Copy Text';
+    copyTextBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        menu.hidden = true;
+        try {
+            await navigator.clipboard.writeText(typeof msg.content === 'string' ? msg.content : '');
+        } catch {
+            // Clipboard unavailable (permissions, insecure context) — nothing to recover here.
+        }
+    });
+    menu.appendChild(copyTextBtn);
+
+    const viewJsonBtn = document.createElement('button');
+    viewJsonBtn.type = 'button';
+    viewJsonBtn.className = 'message-menu-item';
+    viewJsonBtn.textContent = 'View JSON';
+    viewJsonBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        menu.hidden = true;
+        openViewJsonModal(msg);
+    });
+    menu.appendChild(viewJsonBtn);
+
+    menuBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        document.querySelectorAll('.message-menu').forEach((el) => {
+            if (el !== menu) el.hidden = true;
+        });
+        if (typeof options.onOpen === 'function') {
+            options.onOpen();
+        }
+        const willOpen = menu.hidden;
+        menu.hidden = !willOpen;
+        if (willOpen) {
+            positionPopoverNearButton(menu, menuBtn, true);
+        }
+    });
+
+    document.getElementById('messagePopoverLayer')?.appendChild(menu);
+    actionsEl.appendChild(menuBtn);
+    return { actionsEl, menu, menuBtn };
 }
 
 export function displayMessages(pubkey) {
+    const messages = state.conversations[pubkey] || [];
+    // Sync polls call queueActiveChatRender() unconditionally whether or not anything new actually
+    // arrived. Without this guard, every one of those no-op polls would still fully rebuild the
+    // thread (visible flash) and close any reaction picker the user had open at the time.
+    const fingerprint = 'nip17::' + pubkey + '::' + messages.map(
+        (m) => `${m.id}:${m.timestamp}:${m.reactions ? Object.keys(m.reactions).length : 0}`
+    ).join('|');
+    if (fingerprint === state.displayedMessagesFingerprint) {
+        return;
+    }
+    state.displayedMessagesFingerprint = fingerprint;
+
     const container = document.getElementById('messagesContainer');
     revokeActiveMessageBlobs();
     container.innerHTML = '';
+    // Per-message ⋮ menus are cheap to recreate, so drop the stale ones outright. The shared
+    // reaction picker is NOT torn down here — it's a single persistent instance (see
+    // getSharedReactionPicker) — just hidden, since the message it was targeting no longer exists.
+    document.querySelectorAll('#messagePopoverLayer .message-menu').forEach((el) => el.remove());
+    hideSharedReactionPicker();
 
     if (!state.conversations[pubkey]) return;
 
@@ -744,110 +936,78 @@ export function displayMessages(pubkey) {
 
         const canReact = Boolean(msg.id);
         if (canReact) {
-            const actionsEl = document.createElement('div');
-            actionsEl.className = 'message-actions';
-
-            const reactBtn = document.createElement('button');
-            reactBtn.type = 'button';
-            reactBtn.className = 'message-react-btn';
-            reactBtn.setAttribute('aria-label', 'React to message');
-            reactBtn.textContent = '⋮';
-
-            const picker = document.createElement('div');
-            picker.className = 'message-reaction-picker';
-            picker.hidden = true;
-            picker.dataset.expanded = 'false';
-
-            const quickRow = document.createElement('div');
-            quickRow.className = 'message-reaction-picker-quick';
-
-            const reactionSet = getReactionSet();
-            reactionSet.quick.forEach((emoji) => {
-                const b = createReactionOptionButton(emoji, picker, msg);
-                quickRow.appendChild(b);
+            // Reaction picker — opened via long-press (touch hold or mouse press-and-hold), not the
+            // ⋮ button. Retargets the single shared emoji-mart instance instead of building its own.
+            const { actionsEl, menuBtn } = buildMessageMenu(msg, {
+                onOpen: hideSharedReactionPicker
             });
 
-            const moreBtn = document.createElement('button');
-            moreBtn.type = 'button';
-            moreBtn.className = 'message-reaction-option message-reaction-option--more';
-            moreBtn.setAttribute('aria-label', 'More reactions');
-            moreBtn.textContent = '+';
-            quickRow.appendChild(moreBtn);
-            picker.appendChild(quickRow);
-
-            const expanded = document.createElement('div');
-            expanded.className = 'message-reaction-expanded';
-            expanded.hidden = true;
-
-            reactionSet.extra.forEach((emoji) => {
-                const b = createReactionOptionButton(emoji, picker, msg, () => {
-                    expanded.hidden = true;
-                    picker.dataset.expanded = 'false';
-                    moreBtn.hidden = false;
+            const openPicker = () => {
+                document.querySelectorAll('.message-menu').forEach((el) => {
+                    el.hidden = true;
                 });
-                expanded.appendChild(b);
-            });
-
-            moreBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                const willOpen = expanded.hidden;
-                expanded.hidden = !willOpen;
-                picker.dataset.expanded = willOpen ? 'true' : 'false';
-                moreBtn.hidden = willOpen;
-            });
-
-            const closeOtherPickers = () => {
-                container.querySelectorAll('.message-reaction-picker').forEach((el) => {
-                    if (el !== picker) {
-                        el.hidden = true;
-                        el.dataset.expanded = 'false';
-                        const ex = el.querySelector('.message-reaction-expanded');
-                        if (ex) ex.hidden = true;
-                        const mb = el.querySelector('.message-reaction-option--more');
-                        if (mb) mb.hidden = false;
+                getSharedReactionPicker().then(async (shared) => {
+                    shared.setTarget(msg, () => {
+                        shared.root.hidden = true;
+                    });
+                    shared.root.hidden = false;
+                    // Rough placement immediately (usually already correct — the shadow-DOM content
+                    // was built while hidden, and un-hiding forces a synchronous layout). Then confirm
+                    // it actually has real dimensions and refine, in case that first read raced ahead
+                    // of paint on a slower device.
+                    positionPopoverNearButton(shared.root, menuBtn, true);
+                    await waitForNonZeroSize(shared.root);
+                    if (!shared.root.hidden) {
+                        positionPopoverNearButton(shared.root, menuBtn, true);
                     }
                 });
             };
 
-            const togglePicker = (forceOpen = false) => {
-                closeOtherPickers();
-                picker.hidden = forceOpen ? false : !picker.hidden;
-                if (picker.hidden) {
-                    picker.dataset.expanded = 'false';
-                    expanded.hidden = true;
-                    moreBtn.hidden = false;
-                }
-            };
-
-            reactBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                togglePicker(false);
-            });
-
             let longPressTimer = null;
+            // The mouseup/touchend that ends a long-press also fires a native "click" on this
+            // element right after, which would otherwise bubble to the document-level outside-click
+            // closer and immediately hide the picker we just opened. Swallow exactly that one click.
+            let suppressNextClick = false;
             const clearLongPress = () => {
                 if (longPressTimer) {
                     clearTimeout(longPressTimer);
                     longPressTimer = null;
                 }
             };
-
-            div.addEventListener('touchstart', (e) => {
-                if (!isMobileLayout() || e.target.closest('.message-actions')) {
-                    return;
-                }
+            const startLongPress = () => {
                 clearLongPress();
                 longPressTimer = setTimeout(() => {
-                    togglePicker(true);
+                    suppressNextClick = true;
+                    openPicker();
                 }, 420);
+            };
+
+            div.addEventListener('click', (e) => {
+                if (suppressNextClick) {
+                    suppressNextClick = false;
+                    e.stopPropagation();
+                }
+            });
+
+            div.addEventListener('touchstart', (e) => {
+                if (e.target.closest('button, a')) {
+                    return;
+                }
+                startLongPress();
             }, { passive: true });
             div.addEventListener('touchend', clearLongPress, { passive: true });
             div.addEventListener('touchcancel', clearLongPress, { passive: true });
             div.addEventListener('touchmove', clearLongPress, { passive: true });
 
-            actionsEl.appendChild(reactBtn);
-            picker.appendChild(expanded);
-            actionsEl.appendChild(picker);
+            div.addEventListener('mousedown', (e) => {
+                if (e.button !== 0 || e.target.closest('button, a')) {
+                    return;
+                }
+                startLongPress();
+            });
+            div.addEventListener('mouseup', clearLongPress);
+            div.addEventListener('mouseleave', clearLongPress);
+
             div.appendChild(actionsEl);
         }
 
@@ -904,9 +1064,18 @@ export function displayMessages(pubkey) {
 }
 
 export function displayNip04Messages(pubkey) {
+    const nip04Messages = state.nip04Conversations[pubkey] || [];
+    const fingerprint = 'nip04::' + pubkey + '::' + nip04Messages.map((m) => `${m.id}:${m.timestamp}`).join('|');
+    if (fingerprint === state.displayedMessagesFingerprint) {
+        return;
+    }
+    state.displayedMessagesFingerprint = fingerprint;
+
     const container = document.getElementById('messagesContainer');
     revokeActiveMessageBlobs();
     container.innerHTML = '';
+    document.querySelectorAll('#messagePopoverLayer .message-menu').forEach((el) => el.remove());
+    hideSharedReactionPicker();
 
     const banner = document.createElement('div');
     banner.className = 'nip04-banner';
@@ -953,6 +1122,11 @@ export function displayNip04Messages(pubkey) {
         const timeEl = document.createElement('div');
         timeEl.className = 'message-time';
         timeEl.textContent = new Date(msg.timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+        if (msg.id) {
+            const { actionsEl } = buildMessageMenu(msg);
+            div.appendChild(actionsEl);
+        }
 
         div.appendChild(bodyEl);
         div.appendChild(timeEl);
@@ -1155,7 +1329,89 @@ export function isOverlayOpen() {
     const modal = document.getElementById('newChatModal');
     const settings = document.getElementById('settingsPage');
     const lightbox = document.getElementById('imageLightbox');
-    return Boolean((modal && !modal.hidden) || (settings && !settings.hidden) || (lightbox && !lightbox.hidden));
+    const viewJson = document.getElementById('viewJsonModal');
+    return Boolean(
+        (modal && !modal.hidden) ||
+        (settings && !settings.hidden) ||
+        (lightbox && !lightbox.hidden) ||
+        (viewJson && !viewJson.hidden)
+    );
+}
+
+export function openViewJsonModal(msg) {
+    const modal = document.getElementById('viewJsonModal');
+    const body = document.getElementById('viewJsonBody');
+    if (!modal || !body || !msg) return;
+    const display = {
+        id: msg.id,
+        pubkey: msg.pubkey || msg.from,
+        created_at: msg.timestamp,
+        kind: msg.kind,
+        tags: msg.tags || [],
+        content: msg.content
+    };
+    if (msg.sig) {
+        display.sig = msg.sig;
+    }
+    body.textContent = JSON.stringify(display, null, 2);
+    modal.hidden = false;
+    syncBodyOverlayLock();
+}
+
+export function closeViewJsonModal() {
+    const modal = document.getElementById('viewJsonModal');
+    if (modal) {
+        modal.hidden = true;
+    }
+    syncBodyOverlayLock();
+}
+
+export function initMessageMenus() {
+    document.addEventListener('click', (e) => {
+        // composedPath (not e.target) because emoji-mart renders inside a shadow root — a click on
+        // one of its internal category tabs gets retargeted to the shadow host at this listener,
+        // but composedPath still lets us see it's inside .message-reaction-picker so we don't treat
+        // it as an "outside" click and close the picker the user is actively using.
+        const path = typeof e.composedPath === 'function' ? e.composedPath() : [e.target];
+        const isClassMatch = (el, cls) => el instanceof Element && el.classList.contains(cls);
+        const insideMenu = path.some((el) => isClassMatch(el, 'message-menu'));
+        const insidePicker = path.some((el) => isClassMatch(el, 'message-reaction-picker'));
+
+        if (!insideMenu) {
+            document.querySelectorAll('.message-menu').forEach((el) => {
+                el.hidden = true;
+            });
+        }
+        if (!insidePicker) {
+            document.querySelectorAll('.message-reaction-picker').forEach((el) => {
+                el.hidden = true;
+            });
+        }
+    });
+}
+
+export function initViewJsonModal() {
+    const modal = document.getElementById('viewJsonModal');
+    const closeBtn = document.getElementById('viewJsonModalClose');
+    const copyBtn = document.getElementById('viewJsonCopyBtn');
+    if (!modal) return;
+
+    closeBtn?.addEventListener('click', closeViewJsonModal);
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) closeViewJsonModal();
+    });
+    copyBtn?.addEventListener('click', async () => {
+        const body = document.getElementById('viewJsonBody');
+        try {
+            await navigator.clipboard.writeText(body?.textContent || '');
+            copyBtn.textContent = '✓';
+        } catch {
+            copyBtn.textContent = '!';
+        }
+        setTimeout(() => {
+            copyBtn.textContent = '⧉';
+        }, 1200);
+    });
 }
 
 export function syncBodyOverlayLock() {

@@ -34,6 +34,8 @@ import {
     initEmojiPicker,
     initNewChatUi,
     initImageLightbox,
+    initViewJsonModal,
+    initMessageMenus,
     isMobileLayout,
     setMobileChatPanel,
     backToConversations,
@@ -316,6 +318,8 @@ document.addEventListener('DOMContentLoaded', function() {
     initNewChatUi();
     initSettingsUi();
     initImageLightbox();
+    initViewJsonModal();
+    initMessageMenus();
 
     const imageFileInput = document.getElementById('imageFileInput');
     const imageUploadBtn = document.getElementById('imageUploadBtn');
