@@ -47,6 +47,9 @@ export const STALE_PENDING_REACTION_MS = 90_000;
 export const NOSTR_ARCHIVES_SEARCH_SUGGEST_URL = 'https://api.nostrarchives.com/v1/search/suggest';
 export const NOSTR_ARCHIVES_PROFILES_METADATA_URL = 'https://api.nostrarchives.com/v1/profiles/metadata';
 export const PROFILE_METADATA_BATCH_SIZE = 100;
+/** How long a cached profile (name/avatar/etc.) is trusted before we re-check it in the
+ *  background — otherwise an update made on another client would never be picked up. */
+export const PROFILE_CACHE_TTL_MS = 60 * 60 * 1000;
 
 export const IDB_NAME = 'bullishchat';
 export const IDB_VERSION = 3;
