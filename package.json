@@ -1,6 +1,6 @@
 {
   "name": "bullishchat",
-  "version": "0.20.1",
+  "version": "0.20.2",
   "description": "Private messaging on Nostr. Sign in with a browser extension; keys never leave your wallet.",
   "type": "module",
   "scripts": {

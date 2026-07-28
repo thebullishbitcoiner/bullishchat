@@ -50,6 +50,9 @@ export const state = {
     /** Blob URLs for decrypted kind-15 previews — revoked when the message list re-renders. */
     activeMessageBlobUrls: new Set(),
     profileFetchInFlight: new Map(),
+    /** Timestamp of the last transient (network/timeout) profile fetch failure per pubkey, so
+     *  fetchUserProfile can cool down retries without permanently caching a bad "empty" result. */
+    profileFetchFailedAt: new Map(),
     conversationRepairLastRunMs: new Map(),
     /** Per-thread repair so opening chat B is not blocked by chat A. */
     conversationRepairRunning: new Set(),

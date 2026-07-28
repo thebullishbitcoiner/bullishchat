@@ -1266,6 +1266,7 @@ export function openNewChatModal() {
     const input = document.getElementById('newChatSearch');
     const sugg = document.getElementById('newChatSuggestions');
     const status = document.getElementById('newChatSearchStatus');
+    const title = document.getElementById('newChatModalTitle');
     if (!modal || !input) {
         return;
     }
@@ -1281,9 +1282,13 @@ export function openNewChatModal() {
         sugg.innerHTML = '';
         sugg.hidden = true;
     }
+    if (title) {
+        title.textContent = state.activeConversationTab === 'nip04' ? 'New NIP-04 Chat' : 'New Chat';
+    }
     if (status) {
-        status.textContent =
-            'Type a name, paste a full npub, or enter a 64-character hex pubkey.';
+        status.textContent = state.activeConversationTab === 'nip04'
+            ? 'Type a name, paste a full npub, or enter a 64-character hex pubkey. Messages will use legacy NIP-04 encryption.'
+            : 'Type a name, paste a full npub, or enter a 64-character hex pubkey.';
     }
     syncBodyOverlayLock();
     setTimeout(() => input.focus(), 50);
@@ -1709,7 +1714,12 @@ export async function beginChatWithPubkey(hex, hit = null) {
     }
 
     try {
-        if (!state.conversations[pk]) {
+        const useNip04 = state.activeConversationTab === 'nip04';
+        if (useNip04) {
+            if (!state.nip04Conversations[pk]) {
+                state.nip04Conversations[pk] = [];
+            }
+        } else if (!state.conversations[pk]) {
             state.conversations[pk] = [];
         }
         if (hit) {
@@ -1723,7 +1733,11 @@ export async function beginChatWithPubkey(hex, hit = null) {
         await fetchUserProfile(pk);
         closeNewChatModal();
         closeFabMenu();
-        openChat(pk);
+        if (useNip04) {
+            openNip04Chat(pk);
+        } else {
+            openChat(pk);
+        }
     } catch (error) {
         alert('Could not open chat: ' + (error?.message || String(error)));
     }

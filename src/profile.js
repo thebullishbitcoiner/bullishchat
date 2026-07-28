@@ -79,27 +79,44 @@ export async function enrichDiscoverEmojiSetAuthors(pubkeys) {
     }
 }
 
+/** Cooldown after a transient (network/timeout) failure before we retry the same pubkey,
+ *  so a flaky connection doesn't turn into constant refetching but also never gets stuck. */
+const PROFILE_RETRY_COOLDOWN_MS = 30_000;
+
+/**
+ * Returns the resolved profile, or null on a transient failure (query itself errored).
+ * A relay query that completes but finds no usable kind-0 is a confirmed absence and is
+ * cached as empty; a query that throws is not — that distinction matters because caching
+ * emptyUserProfile() on every failure used to lock a pubkey to "unknown" for the whole
+ * session even after a one-off network blip.
+ */
 export async function fetchUserProfileFromRelays(pubkey) {
+    let events;
     try {
-        const events = await state.pool.querySync(
+        events = await state.pool.querySync(
             getReadRelayUrlsUnsorted(),
-            { kinds: [0], authors: [pubkey], limit: 1 },
+            { kinds: [0], authors: [pubkey], limit: 5 },
             { maxWait: 6000, onauth: nostrAuthHandler }
         );
-        const best = (events || []).sort((a, b) => (b.created_at || 0) - (a.created_at || 0))[0];
-        if (best) {
-            const profile = normalizeProfileMetadata(JSON.parse(best.content));
+    } catch (error) {
+        console.error('Relay profile fetch failed for', pubkey, error);
+        return null;
+    }
+
+    for (const event of (events || []).sort((a, b) => (b.created_at || 0) - (a.created_at || 0))) {
+        try {
+            const profile = normalizeProfileMetadata(JSON.parse(event.content));
             state.userProfiles[pubkey] = profile;
             dbSaveProfile(pubkey, profile);
             return profile;
+        } catch (parseError) {
+            console.warn('Skipping malformed kind-0 event for', pubkey, parseError);
         }
-        if (!state.userProfiles[pubkey]) state.userProfiles[pubkey] = emptyUserProfile();
-        return state.userProfiles[pubkey];
-    } catch (error) {
-        console.error('Relay profile fetch failed for', pubkey, error);
-        if (!state.userProfiles[pubkey]) state.userProfiles[pubkey] = emptyUserProfile();
-        return state.userProfiles[pubkey];
     }
+
+    // Relays answered but had no usable kind-0 — confirmed absence, safe to cache.
+    if (!state.userProfiles[pubkey]) state.userProfiles[pubkey] = emptyUserProfile();
+    return state.userProfiles[pubkey];
 }
 
 // Fetch user profile with hybrid strategy: API first, relay fallback.
@@ -111,6 +128,10 @@ export async function fetchUserProfile(pubkey) {
     if (state.profileFetchInFlight.has(pk)) {
         return state.profileFetchInFlight.get(pk);
     }
+    const failedAt = state.profileFetchFailedAt.get(pk);
+    if (failedAt && Date.now() - failedAt < PROFILE_RETRY_COOLDOWN_MS) {
+        return emptyUserProfile(); // still cooling down; don't hammer, don't cache
+    }
 
     const pending = (async () => {
         try {
@@ -119,6 +140,7 @@ export async function fetchUserProfile(pubkey) {
             if (profile) {
                 state.userProfiles[pk] = profile;
                 dbSaveProfile(pk, profile);
+                state.profileFetchFailedAt.delete(pk);
                 return profile;
             }
         } catch (error) {
@@ -127,10 +149,14 @@ export async function fetchUserProfile(pubkey) {
 
         const relayProfile = await fetchUserProfileFromRelays(pk);
         if (relayProfile) {
+            state.profileFetchFailedAt.delete(pk);
             return relayProfile;
         }
-        state.userProfiles[pk] = emptyUserProfile();
-        return state.userProfiles[pk];
+
+        // Both the API and the relay query failed outright (network/timeout), rather than
+        // confirming the profile doesn't exist. Don't cache permanently — just cool down.
+        state.profileFetchFailedAt.set(pk, Date.now());
+        return emptyUserProfile();
     })();
     state.profileFetchInFlight.set(pk, pending);
     try {

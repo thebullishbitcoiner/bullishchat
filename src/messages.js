@@ -1040,7 +1040,12 @@ export async function handleKind4Event(event) {
 
     dbSaveNip04Message(peerPubkey, msg);
 
-    if (!state.userProfiles[peerPubkey]) fetchUserProfile(peerPubkey);
+    if (!state.userProfiles[peerPubkey]) {
+        void fetchUserProfile(peerPubkey).then(() => {
+            queueConversationsListUpdate();
+            queueChatHeaderUpdate(peerPubkey);
+        });
+    }
 
     if (msg.timestamp > state.sessionStartedAt) {
         if (state.activeConversationTab !== 'nip04') {
