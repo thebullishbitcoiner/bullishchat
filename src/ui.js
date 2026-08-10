@@ -1821,7 +1821,14 @@ export function initNewChatUi() {
     });
 }
 
-export function updateRelayStatusCard(defaultResults, inboxResults = []) {
+/**
+ * Shows the resolved inbox relays (kind 10050/NIP-65) once discovery has run. Bootstrap/default
+ * relays are connection plumbing, not something the user configured, so they're never shown.
+ * Before discovery finishes, call with no args to leave the panel empty; once discovery has
+ * actually run, pass `attempted: true` so a 0-result outcome renders an explanatory empty state
+ * instead of silently leaving no card at all (that read as a bug rather than "nothing found").
+ */
+export function updateRelayStatusCard(inboxResults = [], { attempted = false } = {}) {
     const body = document.getElementById('rightPanelBody');
     const panel = document.getElementById('rightPanel');
     if (!body || !panel) return;
@@ -1831,35 +1838,32 @@ export function updateRelayStatusCard(defaultResults, inboxResults = []) {
     const existing = document.getElementById('relayStatusCard');
     if (existing) existing.remove();
 
+    if (!inboxResults.length && !attempted) return;
+
     const card = document.createElement('div');
     card.className = 'right-panel-card';
     card.id = 'relayStatusCard';
 
-    const allResults = [...defaultResults, ...inboxResults];
-    const connected = allResults.filter((r) => r.success).length;
-
     const titleEl = document.createElement('div');
     titleEl.className = 'right-panel-card-title';
-    titleEl.textContent = `Relays · ${connected}/${allResults.length}`;
     card.appendChild(titleEl);
 
-    const addRows = (results) => {
-        for (const { url, success } of results) {
+    if (!inboxResults.length) {
+        titleEl.textContent = 'Relays';
+        const empty = document.createElement('p');
+        empty.className = 'right-panel-empty';
+        empty.textContent = 'No inbox relays published. Go to Settings → DM Inbox Relays to configure them.';
+        card.appendChild(empty);
+    } else {
+        const connected = inboxResults.filter((r) => r.success).length;
+        titleEl.textContent = `Relays · ${connected}/${inboxResults.length}`;
+
+        for (const { url, success } of inboxResults) {
             const row = document.createElement('div');
             row.className = `right-panel-relay${success ? '' : ' right-panel-relay--error'}`;
             row.textContent = url.replace(/^wss?:\/\//, '').replace(/\/$/, '');
             card.appendChild(row);
         }
-    };
-
-    addRows(defaultResults);
-
-    if (inboxResults.length > 0) {
-        const sep = document.createElement('div');
-        sep.className = 'right-panel-card-sep';
-        sep.textContent = 'Inbox relays';
-        card.appendChild(sep);
-        addRows(inboxResults);
     }
 
     body.insertBefore(card, body.firstChild);

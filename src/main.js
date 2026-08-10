@@ -65,124 +65,152 @@ async function connectWithExtension() {
     }
 
     try {
-        // Get public key from extension (normalize so tag/filter comparisons match)
-        state.publicKey = normalizePubkey(await window.nostr.getPublicKey());
-
-        // Check if extension supports NIP-44 (required for this app)
-        if (!window.nostr.nip44 || !window.nostr.nip44.encrypt || !window.nostr.nip44.decrypt) {
-            if (loginBtn) {
-                loginBtn.disabled = false;
-                loginBtn.textContent = 'Login with Nostr';
-            }
-            alert('Your Nostr extension does not support NIP-44 encryption/decryption.\n\n' +
-                  'This app requires NIP-44 support for secure messaging.\n\n' +
-                  'Please use an extension that supports NIP-44:\n' +
-                  '• Alby (recommended) — https://getalby.com/\n' +
-                  '• Or another extension with NIP-44 support\n\n' +
-                  'After installing/updating, refresh this page.');
-            return;
-        }
-
-        if (state.messageSubscription) {
-            try {
-                state.messageSubscription.close();
-            } catch (e) {
-                console.warn('Closing previous message subscription:', e);
-            }
-            state.messageSubscription = null;
-        }
-        if (state.pool) {
-            stopIncrementalInboxSync();
-            state.gapFillDebounceByConv.forEach((t) => clearTimeout(t));
-            state.gapFillDebounceByConv.clear();
-            state.gapFillLastRunMs.clear();
-            state.conversationRepairRunning.clear();
-            resetSessionSyncState();
-            try {
-                state.pool.destroy();
-            } catch (e) {
-                console.warn('Destroying previous relay pool:', e);
-            }
-        }
-        stopIncrementalNip04Sync();
-        state.lastInboxGiftWrapProcessedSec = 0;
-        state.lastKind4ProcessedSec = 0;
-        // enableReconnect: pool automatically re-establishes dropped WebSocket connections
-        // and re-sends active subscriptions, covering desktop WiFi drops without manual catchup.
-        state.pool = new SimplePool({ enableReconnect: true });
-
-        // Connect the default relay set only — kind 10050/NIP-65 inbox relay discovery is
-        // slow (multi-relay EOSE waits) and runs in the background so it doesn't block login.
-        const bootstrapResults = await connectRelaySet(RELAY_URLS);
-
-        document.getElementById('connectionSetup').style.display = 'none';
-        document.getElementById('convTabs')?.removeAttribute('hidden');
-        document.body.classList.add('is-authenticated');
-        const fab = document.getElementById('sidebarFab');
-        if (fab) {
-            fab.removeAttribute('hidden');
-        }
-        const settingsBtn = document.getElementById('sidebarSettingsBtn');
-        if (settingsBtn) {
-            settingsBtn.removeAttribute('hidden');
-        }
-        const chatAreaEl = document.getElementById('chatArea');
-        if (chatAreaEl) chatAreaEl.removeAttribute('hidden');
-
-        updateRelayStatusCard(bootstrapResults, []);
-
-        // Load persisted state from IndexedDB before showing conversations — instant display
-        // for returning users without waiting for relay queries to complete. This also restores
-        // dmRelayUrls discovered in a prior session, so subscriptions below can already target
-        // the user's real inbox relay instead of only the app defaults.
-        await loadStateFromDB(state.publicKey);
-        await loadNip04StateFromDB(state.publicKey);
-        updateConversationsList();
-
-        // Refresh blossom server list from kind 10063 so upload order matches what the user
-        // configured (potentially from another client), not just the stale IDB cache.
-        void fetchKind10063Servers(state.publicKey).then((servers) => {
-            if (servers.length) {
-                state.blossomServers = servers;
-                void idbPut('meta', { key: 'blossomServers', value: servers }).catch(() => {});
-            }
-        });
-
-        // Refresh the mute list from kind 10000 (may include mutes made on another device/client
-        // since our local IDB cache was written); re-render once resolved so any newly-muted
-        // conversation that slipped in from the DB cache is dropped from the list.
-        void loadMuteListFromNostr().then(() => updateConversationsList());
-
-        setInboxLoading(true);
-        await loadOwnCustomReactionSetFromNostr();
-
-        // Live subscription first so new mail arrives while history is still decrypting.
-        // History uses paginated querySync (relay result caps) + batched UI updates for mobile perf.
-        subscribeToMessages();
-        subscribeToNip04Messages();
-        startIncrementalInboxSync();
-        startIncrementalNip04Sync();
-        updateSettingsSyncUiState();
-        void fetchHistoricalGiftWraps().finally(() => {
-            setInboxLoading(false);
-            prefetchMissingConversationProfiles();
-        });
-        void loadHistoricalNip04Messages();
-
-        // Resolve authoritative inbox relays (kind 10050, falling back to NIP-65) in the
-        // background. If discovery finds a relay set we weren't already using, connect to
-        // it and restart the live subscriptions so messages there aren't missed.
-        void refreshInboxRelaysInBackground(bootstrapResults);
-
+        await performLogin();
     } catch (error) {
         setInboxLoading(false);
         if (loginBtn) {
             loginBtn.disabled = false;
             loginBtn.textContent = 'Login with Nostr';
         }
-        alert('Connection failed: ' + error.message);
-        console.error(error);
+        if (error.code === 'NIP44_UNSUPPORTED') {
+            alert('Your Nostr extension does not support NIP-44 encryption/decryption.\n\n' +
+                  'This app requires NIP-44 support for secure messaging.\n\n' +
+                  'Please use an extension that supports NIP-44:\n' +
+                  '• Alby (recommended) — https://getalby.com/\n' +
+                  '• Or another extension with NIP-44 support\n\n' +
+                  'After installing/updating, refresh this page.');
+        } else {
+            alert('Connection failed: ' + error.message);
+            console.error(error);
+        }
     }
+}
+
+/**
+ * Silent counterpart to connectWithExtension(), used to resume a session automatically on page
+ * load when bullishchat_autoLogin is set. No button/alert UI (there's nothing on screen yet) —
+ * on failure it just clears the flag and falls back to the login screen.
+ */
+async function attemptAutoLogin() {
+    try {
+        await performLogin();
+    } catch (error) {
+        console.warn('Auto-login failed, falling back to login screen:', error);
+        localStorage.removeItem('bullishchat_autoLogin');
+        setInboxLoading(false);
+        const setup = document.getElementById('connectionSetup');
+        if (setup) setup.style.display = '';
+    }
+}
+
+/** Shared core of the login flow, used by both the manual button and silent auto-login. */
+async function performLogin() {
+    // Get public key from extension (normalize so tag/filter comparisons match)
+    state.publicKey = normalizePubkey(await window.nostr.getPublicKey());
+
+    // Check if extension supports NIP-44 (required for this app)
+    if (!window.nostr.nip44 || !window.nostr.nip44.encrypt || !window.nostr.nip44.decrypt) {
+        const err = new Error('This extension does not support NIP-44 encryption/decryption.');
+        err.code = 'NIP44_UNSUPPORTED';
+        throw err;
+    }
+
+    if (state.messageSubscription) {
+        try {
+            state.messageSubscription.close();
+        } catch (e) {
+            console.warn('Closing previous message subscription:', e);
+        }
+        state.messageSubscription = null;
+    }
+    if (state.pool) {
+        stopIncrementalInboxSync();
+        state.gapFillDebounceByConv.forEach((t) => clearTimeout(t));
+        state.gapFillDebounceByConv.clear();
+        state.gapFillLastRunMs.clear();
+        state.conversationRepairRunning.clear();
+        resetSessionSyncState();
+        try {
+            state.pool.destroy();
+        } catch (e) {
+            console.warn('Destroying previous relay pool:', e);
+        }
+    }
+    stopIncrementalNip04Sync();
+    state.lastInboxGiftWrapProcessedSec = 0;
+    state.lastKind4ProcessedSec = 0;
+    // enableReconnect: pool automatically re-establishes dropped WebSocket connections
+    // and re-sends active subscriptions, covering desktop WiFi drops without manual catchup.
+    state.pool = new SimplePool({ enableReconnect: true });
+
+    // Connect the default relay set only — kind 10050/NIP-65 inbox relay discovery is
+    // slow (multi-relay EOSE waits) and runs in the background so it doesn't block login.
+    const bootstrapResults = await connectRelaySet(RELAY_URLS);
+
+    document.getElementById('connectionSetup').style.display = 'none';
+    document.getElementById('convTabs')?.removeAttribute('hidden');
+    document.body.classList.add('is-authenticated');
+    const fab = document.getElementById('sidebarFab');
+    if (fab) {
+        fab.removeAttribute('hidden');
+    }
+    const settingsBtn = document.getElementById('sidebarSettingsBtn');
+    if (settingsBtn) {
+        settingsBtn.removeAttribute('hidden');
+    }
+    const logoutBtn = document.getElementById('sidebarLogoutBtn');
+    if (logoutBtn) {
+        logoutBtn.removeAttribute('hidden');
+    }
+    const chatAreaEl = document.getElementById('chatArea');
+    if (chatAreaEl) chatAreaEl.removeAttribute('hidden');
+
+    localStorage.setItem('bullishchat_autoLogin', '1');
+
+    updateRelayStatusCard();
+
+    // Load persisted state from IndexedDB before showing conversations — instant display
+    // for returning users without waiting for relay queries to complete. This also restores
+    // dmRelayUrls discovered in a prior session, so subscriptions below can already target
+    // the user's real inbox relay instead of only the app defaults.
+    await loadStateFromDB(state.publicKey);
+    await loadNip04StateFromDB(state.publicKey);
+    updateConversationsList();
+
+    // Refresh blossom server list from kind 10063 so upload order matches what the user
+    // configured (potentially from another client), not just the stale IDB cache.
+    void fetchKind10063Servers(state.publicKey).then((servers) => {
+        if (servers.length) {
+            state.blossomServers = servers;
+            void idbPut('meta', { key: 'blossomServers', value: servers }).catch(() => {});
+        }
+    });
+
+    // Refresh the mute list from kind 10000 (may include mutes made on another device/client
+    // since our local IDB cache was written); re-render once resolved so any newly-muted
+    // conversation that slipped in from the DB cache is dropped from the list.
+    void loadMuteListFromNostr().then(() => updateConversationsList());
+
+    setInboxLoading(true);
+    await loadOwnCustomReactionSetFromNostr();
+
+    // Live subscription first so new mail arrives while history is still decrypting.
+    // History uses paginated querySync (relay result caps) + batched UI updates for mobile perf.
+    subscribeToMessages();
+    subscribeToNip04Messages();
+    startIncrementalInboxSync();
+    startIncrementalNip04Sync();
+    updateSettingsSyncUiState();
+    void fetchHistoricalGiftWraps().finally(() => {
+        setInboxLoading(false);
+        prefetchMissingConversationProfiles();
+    });
+    void loadHistoricalNip04Messages();
+
+    // Resolve authoritative inbox relays (kind 10050, falling back to NIP-65) in the
+    // background. If discovery finds a relay set we weren't already using, connect to
+    // it and restart the live subscriptions so messages there aren't missed.
+    void refreshInboxRelaysInBackground(bootstrapResults);
 }
 
 /**
@@ -198,6 +226,7 @@ async function refreshInboxRelaysInBackground(bootstrapResults) {
         if (!discovered.length) {
             console.warn('Inbox relays not found via kind 10050 or NIP-65 — using default relays. ' +
                 'Go to Settings → DM Relays to configure your inbox relays.');
+            updateRelayStatusCard([], { attempted: true });
             return;
         }
 
@@ -217,7 +246,7 @@ async function refreshInboxRelaysInBackground(bootstrapResults) {
         // even when it matches what we already had (e.g. a returning user's cached relays).
         const relayStatusByUrl = new Map([...bootstrapResults, ...additionalResults].map((r) => [r.url, r]));
         const inboxRelayStatuses = newSet.map((url) => relayStatusByUrl.get(url) || { url, success: false });
-        updateRelayStatusCard(bootstrapResults, inboxRelayStatuses);
+        updateRelayStatusCard(inboxRelayStatuses);
 
         if (!subscriptionRelaysChanged) return;
 
@@ -241,11 +270,23 @@ async function refreshInboxRelaysInBackground(bootstrapResults) {
         subscribeToNip04Messages();
     } catch (e) {
         console.warn('Background inbox relay resolution failed:', e);
+        updateRelayStatusCard([], { attempted: true });
     }
+}
+
+/**
+ * Ends the session and returns to the login screen. A full reload (rather than manually
+ * resetting the ~50 fields on `state`, including timers/subscriptions/Maps/Sets) guarantees a
+ * clean slate with no risk of stale data leaking into the next login.
+ */
+function logout() {
+    localStorage.removeItem('bullishchat_autoLogin');
+    location.reload();
 }
 
 // Make functions available globally for onclick handlers
 window.connectWithExtension = connectWithExtension;
+window.logout = logout;
 window.sendMessage = sendMessage;
 window.backToConversations = backToConversations;
 window.switchConversationTab = switchConversationTab;
@@ -274,6 +315,14 @@ window.__bullishDiag = () => {
 // Initialize DOM event listeners when DOM is ready
 document.addEventListener('DOMContentLoaded', function() {
     void initDB();
+
+    // Resume a prior session automatically instead of showing the login screen again — most
+    // NIP-07 extensions return the same pubkey without re-prompting once permission was granted.
+    if (localStorage.getItem('bullishchat_autoLogin') === '1' && hasNostrExtension()) {
+        const setup = document.getElementById('connectionSetup');
+        if (setup) setup.style.display = 'none';
+        void attemptAutoLogin();
+    }
 
     const versionEl = document.getElementById('appVersion');
     if (versionEl) {

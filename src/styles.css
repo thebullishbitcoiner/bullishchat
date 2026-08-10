@@ -129,7 +129,15 @@ body:not(.is-authenticated) .sidebar-header {
     letter-spacing: 0.02em;
 }
 
-.sidebar-settings-btn {
+.sidebar-header-actions {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.sidebar-settings-btn,
+.sidebar-logout-btn {
     flex-shrink: 0;
     width: 34px;
     height: 34px;
@@ -143,20 +151,24 @@ body:not(.is-authenticated) .sidebar-header {
     justify-content: center;
 }
 
-.sidebar-settings-btn svg {
+.sidebar-settings-btn svg,
+.sidebar-logout-btn svg {
     width: 18px;
     height: 18px;
     fill: currentColor;
 }
 
 .sidebar-settings-btn:hover,
-.sidebar-settings-btn:focus-visible {
+.sidebar-settings-btn:focus-visible,
+.sidebar-logout-btn:hover,
+.sidebar-logout-btn:focus-visible {
     color: #d8d0c6;
     background: rgba(255, 255, 255, 0.08);
     outline: none;
 }
 
-body:not(.is-authenticated) .sidebar-settings-btn {
+body:not(.is-authenticated) .sidebar-settings-btn,
+body:not(.is-authenticated) .sidebar-logout-btn {
     display: none !important;
 }
 
@@ -2093,6 +2105,12 @@ body.is-authenticated .sidebar-fab:not([hidden]) {
     flex-shrink: 0;
 }
 
+.settings-menu-footer {
+    display: flex;
+    justify-content: center;
+    padding: 20px 18px 4px;
+}
+
 .settings-subpage {
     display: flex;
     flex-direction: column;
@@ -2790,15 +2808,6 @@ body.is-authenticated .sidebar-fab:not([hidden]) {
     text-transform: uppercase;
     color: var(--text-muted);
     margin-bottom: 2px;
-}
-
-.right-panel-card-sep {
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--text-muted);
-    margin-top: 4px;
 }
 
 .right-panel-relay {

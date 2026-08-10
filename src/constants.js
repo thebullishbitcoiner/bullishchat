@@ -1,6 +1,6 @@
 // Relay URLs to connect to
 export const RELAY_URLS = [
-    'wss://relay.0xchat.com',
+    'wss://relay.damus.io',
     'wss://relay.primal.net',
     'wss://nos.lol'
 ];

@@ -27,11 +27,15 @@
             <div class="sidebar-header">
                 <h1 class="app-title">
                     <span class="app-name">bullishChat</span>
-                    <span class="app-version" id="appVersion" aria-label="App version"></span>
                 </h1>
-                <button type="button" class="sidebar-settings-btn" id="sidebarSettingsBtn" aria-label="Open settings" hidden>
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.14,12.94a7.49,7.49,0,0,0,.05-.94,7.49,7.49,0,0,0-.05-.94l2.11-1.65a.48.48,0,0,0,.12-.61l-2-3.46a.5.5,0,0,0-.6-.22l-2.49,1a7.28,7.28,0,0,0-1.63-.94l-.38-2.65A.49.49,0,0,0,13.79,2H10.21a.49.49,0,0,0-.49.42L9.34,5.07a7.28,7.28,0,0,0-1.63.94l-2.49-1a.5.5,0,0,0-.6.22l-2,3.46a.48.48,0,0,0,.12.61L4.86,11.06a7.49,7.49,0,0,0-.05.94,7.49,7.49,0,0,0,.05.94L2.75,14.59a.48.48,0,0,0-.12.61l2,3.46a.5.5,0,0,0,.6.22l2.49-1a7.28,7.28,0,0,0,1.63.94l.38,2.65a.49.49,0,0,0,.49.42h3.58a.49.49,0,0,0,.49-.42l.38-2.65a7.28,7.28,0,0,0,1.63-.94l2.49,1a.5.5,0,0,0,.6-.22l2-3.46a.48.48,0,0,0-.12-.61ZM12,15.5A3.5,3.5,0,1,1,15.5,12,3.5,3.5,0,0,1,12,15.5Z"/></svg>
-                </button>
+                <div class="sidebar-header-actions">
+                    <button type="button" class="sidebar-settings-btn" id="sidebarSettingsBtn" aria-label="Open settings" hidden>
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.14,12.94a7.49,7.49,0,0,0,.05-.94,7.49,7.49,0,0,0-.05-.94l2.11-1.65a.48.48,0,0,0,.12-.61l-2-3.46a.5.5,0,0,0-.6-.22l-2.49,1a7.28,7.28,0,0,0-1.63-.94l-.38-2.65A.49.49,0,0,0,13.79,2H10.21a.49.49,0,0,0-.49.42L9.34,5.07a7.28,7.28,0,0,0-1.63.94l-2.49-1a.5.5,0,0,0-.6.22l-2,3.46a.48.48,0,0,0,.12.61L4.86,11.06a7.49,7.49,0,0,0-.05.94,7.49,7.49,0,0,0,.05.94L2.75,14.59a.48.48,0,0,0-.12.61l2,3.46a.5.5,0,0,0,.6.22l2.49-1a7.28,7.28,0,0,0,1.63.94l.38,2.65a.49.49,0,0,0,.49.42h3.58a.49.49,0,0,0,.49-.42l.38-2.65a7.28,7.28,0,0,0,1.63-.94l2.49,1a.5.5,0,0,0,.6-.22l2-3.46a.48.48,0,0,0-.12-.61ZM12,15.5A3.5,3.5,0,1,1,15.5,12,3.5,3.5,0,0,1,12,15.5Z"/></svg>
+                    </button>
+                    <button type="button" class="sidebar-logout-btn" id="sidebarLogoutBtn" aria-label="Log out" onclick="logout()" hidden>
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.09,15.59L11.5,17l5-5-5-5-1.41,1.41L12.67,11H3v2h9.67ZM19,3H5A2,2,0,0,0,3,5V9H5V5H19V19H5V15H3v4a2,2,0,0,0,2,2H19a2,2,0,0,0,2-2V5A2,2,0,0,0,19,3Z"/></svg>
+                    </button>
+                </div>
             </div>
 
             <div class="connection-setup" id="connectionSetup">
@@ -238,6 +242,9 @@
                     </span>
                     <span class="settings-menu-item-chevron" aria-hidden="true">›</span>
                 </button>
+                <div class="settings-menu-footer">
+                    <span class="app-version" id="appVersion" aria-label="App version"></span>
+                </div>
             </nav>
             <section class="settings-subpage" id="settingsSubpage-relays" hidden>
                 <p class="settings-section-note">These are the relays others should use to deliver your private messages.</p>
