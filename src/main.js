@@ -324,10 +324,9 @@ document.addEventListener('DOMContentLoaded', function() {
         void attemptAutoLogin();
     }
 
-    const versionEl = document.getElementById('appVersion');
-    if (versionEl) {
+    document.querySelectorAll('.app-version').forEach(function(versionEl) {
         versionEl.textContent = 'v' + pkg.version;
-    }
+    });
 
     window.addEventListener('resize', function() {
         if (!isMobileLayout()) {
